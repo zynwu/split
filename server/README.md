@@ -27,6 +27,16 @@ curl -X POST http://localhost:8080/groups \
 
 Health check: `GET http://localhost:8080/healthz`
 
+## Data model
+
+The API currently creates rows in `groups`, which has a UUID, name, and
+creation timestamp. `group_actors` stores the durable actor identity for each
+group member. `devices` stores normally stable device identifiers, and
+`actor_device_bindings` records the history of which device represented which
+actor when a device is replaced or an actor is reclaimed. Transactions should
+reference both `actor_uuid` and `device_id` so identity corrections do not
+erase device history.
+
 Stop the containers with:
 
 ```sh

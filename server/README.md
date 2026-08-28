@@ -27,6 +27,24 @@ curl -X POST http://localhost:8080/groups \
 
 Health check: `GET http://localhost:8080/healthz`
 
+## Database migrations
+
+The API runs the SQL files in `database/migrations/` during startup. Files are applied
+in numeric order and recorded in the `schema_migrations` table. Each migration
+runs once in a transaction, so restarting the API does not recreate or erase
+data. Applied migration files must not be edited; add a new file such as
+`0002_add_group_color.sql` for the next schema change.
+
+After adding a migration, rebuild or restart the API so it starts with the new
+binary:
+
+```sh
+docker compose up -d --build api
+```
+
+`docker compose down` preserves the database volume. Use `docker compose down
+-v` only when you intentionally want to delete all local PostgreSQL data.
+
 ## Data model
 
 The API currently creates rows in `groups`, which has a UUID, name, and

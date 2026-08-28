@@ -9,6 +9,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"server/database"
 )
 
 func main() {
@@ -18,15 +20,15 @@ func main() {
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	database, err := openDatabase(ctx, databaseURL)
+	db, err := database.Open(ctx, databaseURL)
 	cancel()
 	if err != nil {
 		log.Fatalf("opening database: %v", err)
 	}
-	defer database.Close()
+	defer db.Close()
 
 	port := valueOrDefault(os.Getenv("PORT"), "8080")
-	server := newHTTPServer(":"+port, database)
+	server := newHTTPServer(":"+port, db)
 
 	shutdown := make(chan os.Signal, 1)
 	signal.Notify(shutdown, os.Interrupt, syscall.SIGTERM)
@@ -49,11 +51,11 @@ func main() {
 	}
 }
 
-func newHTTPServer(address string, database *Database) *http.Server {
+func newHTTPServer(address string, db *database.Database) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", rootHandler)
-	mux.HandleFunc("GET /healthz", database.healthHandler)
-	mux.HandleFunc("POST /groups", database.createGroupHandler)
+	mux.HandleFunc("GET /healthz", healthHandler(db))
+	mux.HandleFunc("POST /groups", createGroupHandler(db))
 
 	return &http.Server{
 		Addr:              address,

@@ -82,7 +82,6 @@ struct ContentView: View {
 private struct GroupDetailView: View {
     @Bindable var store: SplitStore
     let groupID: GroupID
-    @State private var actorName: String = ""
 
     private var group: ExpenseGroup? {
         store.groups.first { $0.id == groupID }
@@ -113,20 +112,6 @@ private struct GroupDetailView: View {
                             }
                         }
                     }
-                    .onDelete { offsets in
-                        removeActors(at: offsets, from: group)
-                    }
-                }
-
-                Section("Add Member") {
-                    HStack {
-                        TextField("Display name", text: $actorName)
-                            .textInputAutocapitalization(.words)
-                            .onSubmit(addActor)
-
-                        Button("Add", action: addActor)
-                            .disabled(actorName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    }
                 }
             } else {
                 Text("Group not found")
@@ -136,16 +121,6 @@ private struct GroupDetailView: View {
         .navigationTitle(group?.name ?? "Group")
     }
 
-    private func addActor() {
-        store.addActor(named: actorName, to: groupID)
-        actorName = ""
-    }
-
-    private func removeActors(at offsets: IndexSet, from group: ExpenseGroup) {
-        for index in offsets.sorted(by: >) {
-            store.removeActor(group.actorIDs[index], from: group.id)
-        }
-    }
 }
 
 #Preview {

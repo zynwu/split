@@ -126,32 +126,6 @@ final class SplitStore {
         persist()
     }
 
-    func addActor(named displayName: String, to groupID: GroupID) {
-        let cleanName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanName.isEmpty else { return }
-        let actor = Actor(id: .generate(), displayName: cleanName, deviceID: nil, isLocal: false)
-        actors.append(actor)
-
-        updateGroup(id: groupID) { group in
-            group.actorIDs.append(actor.id)
-        }
-    }
-
-    func addLocalActor(to groupID: GroupID) {
-        updateGroup(id: groupID) { group in
-            guard !group.actorIDs.contains(localActorID) else { return }
-            group.actorIDs.append(localActorID)
-        }
-    }
-
-    func removeActor(_ actorID: ActorID, from groupID: GroupID) {
-        updateGroup(id: groupID) { group in
-            guard group.actorIDs.count > 1 else { return }
-            group.actorIDs.removeAll { $0 == actorID }
-        }
-        pruneUnusedNonLocalActors()
-        persist()
-    }
 
     func actor(for actorID: ActorID) -> Actor? {
         actors.first { $0.id == actorID }
@@ -179,12 +153,6 @@ final class SplitStore {
     private func updateActor(id: ActorID, update: (inout Actor) -> Void) {
         guard let index = actors.firstIndex(where: { $0.id == id }) else { return }
         update(&actors[index])
-        persist()
-    }
-
-    private func updateGroup(id: GroupID, update: (inout ExpenseGroup) -> Void) {
-        guard let index = groups.firstIndex(where: { $0.id == id }) else { return }
-        update(&groups[index])
         persist()
     }
 

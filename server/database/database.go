@@ -20,9 +20,20 @@ type Group struct {
 	JoinCode     string    `json:"join_code"`
 }
 
+type GroupActor struct {
+	ActorUUID   string `json:"actor_uuid"`
+	DisplayName string `json:"display_name"`
+}
+
 type GroupMembership struct {
 	Group
 	ActorUUID string `json:"actor_uuid"`
+}
+
+type GroupWithActors struct {
+	Group
+	ActorUUID string       `json:"actor_uuid"`
+	Actors    []GroupActor `json:"actors"`
 }
 
 func Open(ctx context.Context, databaseURL string) (*Database, error) {

@@ -294,11 +294,11 @@ final class SplitStore {
     }
 
     private func applyServerGroups(_ serverGroups: [ServerGroup]) {
-        let serverActorIDs = Set(serverGroups.map(\.actorID))
+        let serverActorIDs = Set(serverGroups.flatMap(\.actorIDs))
         actors.removeAll { $0.isLocal && !serverActorIDs.contains($0.id) }
 
         for serverGroup in serverGroups {
-            upsertLocalActor(id: serverGroup.actorID)
+            upsertActors(from: serverGroup)
         }
 
         groups = serverGroups.map(makeExpenseGroup)
@@ -307,7 +307,7 @@ final class SplitStore {
     }
 
     private func applyServerGroup(_ serverGroup: ServerGroup) {
-        upsertLocalActor(id: serverGroup.actorID)
+        upsertActors(from: serverGroup)
 
         let group = makeExpenseGroup(from: serverGroup)
         if let index = groups.firstIndex(where: { $0.id == group.id }) {
@@ -326,9 +326,36 @@ final class SplitStore {
             name: serverGroup.name,
             joinCode: serverGroup.joinCode,
             localActorID: serverGroup.actorID,
-            actorIDs: [serverGroup.actorID],
+            actorIDs: serverGroup.actorIDs,
             createdAt: serverGroup.createdAt
         )
+    }
+
+    private func upsertActors(from serverGroup: ServerGroup) {
+        for serverActor in serverGroup.actors {
+            if serverActor.id == serverGroup.actorID {
+                upsertLocalActor(id: serverActor.id)
+            } else {
+                upsertRemoteActor(id: serverActor.id, displayName: serverActor.displayName)
+            }
+        }
+
+        if !serverGroup.actors.contains(where: { $0.id == serverGroup.actorID }) {
+            upsertLocalActor(id: serverGroup.actorID)
+        }
+    }
+
+    private func upsertRemoteActor(id actorID: ActorID, displayName: String?) {
+        let name = displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedName = name.flatMap { $0.isEmpty ? nil : $0 } ?? actorID.rawValue
+
+        if let index = actors.firstIndex(where: { $0.id == actorID }) {
+            guard !actors[index].isLocal else { return }
+            actors[index].displayName = resolvedName
+            actors[index].deviceID = nil
+        } else {
+            actors.append(Actor(id: actorID, displayName: resolvedName, deviceID: nil, isLocal: false))
+        }
     }
 
     nonisolated private static var defaultStorageURL: URL {

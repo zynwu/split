@@ -55,10 +55,11 @@ curl http://localhost:8080/api/groups \
   -H 'Authorization: Bearer <auth_token-from-register>'
 ```
 
-The response contains each group's `uuid`, `name`, `creation_date`, and the
-current device's `actor_uuid` and `join_code` for that group. The group UUID is
-used for future group requests, while the actor UUID identifies this member
-when creating transactions or other group data.
+The response contains each group's `uuid`, `name`, `creation_date`, the
+current device's `actor_uuid`, and `join_code`, plus an `actors` array containing
+every active actor in that group. Each actor has an `actor_uuid` and optional
+display name. The group UUID is used for future group requests, while the actor
+UUID identifies a member when creating transactions or other group data.
 
 Join another group with its six-letter join code:
 

@@ -100,19 +100,24 @@ func (database *Database) createGroupAttempt(ctx context.Context, name, deviceID
 	}, false, nil
 }
 
-func (database *Database) ListGroupsForDevice(ctx context.Context, deviceID string) ([]GroupMembership, error) {
+func (database *Database) ListGroupsForDevice(ctx context.Context, deviceID string) ([]GroupWithActors, error) {
 	const query = `
-		SELECT g.uuid, g.name, g.creation_date, g.join_code, b.actor_uuid
-		FROM actor_device_bindings AS b
+		SELECT g.uuid, g.name, g.creation_date, g.join_code,
+			current_binding.actor_uuid,
+			a.actor_uuid, COALESCE(a.display_name, '')
+		FROM actor_device_bindings AS current_binding
 		JOIN groups AS g
-			ON g.uuid = b.group_uuid
+			ON g.uuid = current_binding.group_uuid
+		JOIN group_actors AS current_actor
+			ON current_actor.group_uuid = current_binding.group_uuid
+			AND current_actor.actor_uuid = current_binding.actor_uuid
+			AND current_actor.archived_at IS NULL
 		JOIN group_actors AS a
-			ON a.group_uuid = b.group_uuid
-			AND a.actor_uuid = b.actor_uuid
-		WHERE b.device_id = $1
-			AND b.unbound_at IS NULL
+			ON a.group_uuid = current_binding.group_uuid
 			AND a.archived_at IS NULL
-		ORDER BY g.creation_date, g.uuid`
+		WHERE current_binding.device_id = $1
+			AND current_binding.unbound_at IS NULL
+		ORDER BY g.creation_date, g.uuid, a.created_at, a.actor_uuid`
 
 	rows, err := database.db.QueryContext(ctx, query, deviceID)
 	if err != nil {
@@ -120,19 +125,31 @@ func (database *Database) ListGroupsForDevice(ctx context.Context, deviceID stri
 	}
 	defer rows.Close()
 
-	groups := make([]GroupMembership, 0)
+	groups := make([]GroupWithActors, 0)
 	for rows.Next() {
-		var membership GroupMembership
+		var group Group
+		var currentActorUUID string
+		var actor GroupActor
 		if err := rows.Scan(
-			&membership.UUID,
-			&membership.Name,
-			&membership.CreationDate,
-			&membership.JoinCode,
-			&membership.ActorUUID,
+			&group.UUID,
+			&group.Name,
+			&group.CreationDate,
+			&group.JoinCode,
+			&currentActorUUID,
+			&actor.ActorUUID,
+			&actor.DisplayName,
 		); err != nil {
 			return nil, fmt.Errorf("scan group membership: %w", err)
 		}
-		groups = append(groups, membership)
+
+		if len(groups) == 0 || groups[len(groups)-1].UUID != group.UUID {
+			groups = append(groups, GroupWithActors{
+				Group:     group,
+				ActorUUID: currentActorUUID,
+				Actors:    make([]GroupActor, 0, 1),
+			})
+		}
+		groups[len(groups)-1].Actors = append(groups[len(groups)-1].Actors, actor)
 	}
 
 	if err := rows.Err(); err != nil {

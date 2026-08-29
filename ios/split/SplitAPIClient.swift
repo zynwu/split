@@ -55,12 +55,34 @@ struct JoinGroupRequest: Encodable {
     let join_code: String
 }
 
+struct ServerActor: Decodable, Hashable {
+    let id: ActorID
+    let displayName: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case actor_uuid
+        case display_name
+    }
+
+    init(id: ActorID, displayName: String?) {
+        self.id = id
+        self.displayName = displayName
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = ActorID(rawValue: try container.decode(String.self, forKey: .actor_uuid))
+        self.displayName = try container.decodeIfPresent(String.self, forKey: .display_name)
+    }
+}
+
 struct ServerGroup: Decodable {
     let id: GroupID
     let name: String
     let createdAt: Date
     let joinCode: String
     let actorID: ActorID
+    let actors: [ServerActor]
 
     private enum CodingKeys: String, CodingKey {
         case uuid
@@ -68,15 +90,32 @@ struct ServerGroup: Decodable {
         case creation_date
         case join_code
         case actor_uuid
+        case actors
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.id = GroupID(rawValue: try container.decode(String.self, forKey: .uuid))
-        self.name = try container.decode(String.self, forKey: .name)
-        self.createdAt = try container.decode(Date.self, forKey: .creation_date)
-        self.joinCode = try container.decode(String.self, forKey: .join_code)
-        self.actorID = ActorID(rawValue: try container.decode(String.self, forKey: .actor_uuid))
+        let id = GroupID(rawValue: try container.decode(String.self, forKey: .uuid))
+        let name = try container.decode(String.self, forKey: .name)
+        let createdAt = try container.decode(Date.self, forKey: .creation_date)
+        let joinCode = try container.decode(String.self, forKey: .join_code)
+        let actorID = ActorID(rawValue: try container.decode(String.self, forKey: .actor_uuid))
+
+        self.id = id
+        self.name = name
+        self.createdAt = createdAt
+        self.joinCode = joinCode
+        self.actorID = actorID
+        self.actors = try container.decodeIfPresent([ServerActor].self, forKey: .actors)
+            ?? [ServerActor(id: actorID, displayName: nil)]
+    }
+
+    var actorIDs: [ActorID] {
+        var ids = actors.map(\.id)
+        if !ids.contains(actorID) {
+            ids.insert(actorID, at: 0)
+        }
+        return ids
     }
 }
 

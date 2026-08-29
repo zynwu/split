@@ -34,6 +34,10 @@ struct GroupsResponse: Decodable {
     let groups: [ServerGroup]
 }
 
+struct CreateGroupRequest: Encodable {
+    let name: String
+}
+
 struct ServerGroup: Decodable {
     let id: GroupID
     let name: String
@@ -88,6 +92,13 @@ struct SplitAPIClient {
         let request = try authorizedRequest(path: "/groups")
         let response: GroupsResponse = try await send(request)
         return response.groups
+    }
+
+    func createGroup(named name: String) async throws -> ServerGroup {
+        var request = try authorizedRequest(path: "/groups", method: "POST")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(CreateGroupRequest(name: name))
+        return try await send(request)
     }
 
     func authorizedRequest(path: String, method: String = "GET") throws -> URLRequest {

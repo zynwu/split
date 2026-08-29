@@ -4,6 +4,7 @@ struct ContentView: View {
     @Bindable var store: SplitStore
     @State private var displayName: String = ""
     @State private var newGroupName: String = ""
+    @State private var isCreatingGroup = false
 
     var body: some View {
         NavigationStack {
@@ -34,8 +35,8 @@ struct ContentView: View {
                             .textInputAutocapitalization(.words)
                             .onSubmit(createGroup)
 
-                        Button("Add", action: createGroup)
-                            .disabled(newGroupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        Button(isCreatingGroup ? "Adding" : "Add", action: createGroup)
+                            .disabled(isCreatingGroup || newGroupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
 
                     if store.groups.isEmpty {
@@ -72,8 +73,14 @@ struct ContentView: View {
     }
 
     private func createGroup() {
-        store.createGroup(named: newGroupName)
-        newGroupName = ""
+        let groupName = newGroupName
+        isCreatingGroup = true
+
+        Task {
+            await store.createGroup(named: groupName)
+            newGroupName = ""
+            isCreatingGroup = false
+        }
     }
 
     private func deleteGroups(at offsets: IndexSet) {

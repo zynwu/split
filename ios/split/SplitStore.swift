@@ -160,11 +160,16 @@ final class SplitStore {
         }
     }
 
-    func createGroup(named name: String) {
+    func createGroup(named name: String) async {
         let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanName.isEmpty else { return }
-        groups.append(ExpenseGroup(id: .generate(), name: cleanName, actorIDs: [localActorID], createdAt: Date()))
-        persist()
+
+        do {
+            let serverGroup = try await apiClient.createGroup(named: cleanName)
+            applyServerGroup(serverGroup)
+        } catch {
+            registrationStatus = .failed(error.localizedDescription)
+        }
     }
 
     func removeGroup(id: GroupID) {
@@ -195,16 +200,34 @@ final class SplitStore {
         }
 
         upsertLocalActor(displayName: displayName)
-        groups = serverGroups.map { serverGroup in
-            ExpenseGroup(
-                id: serverGroup.id,
-                name: serverGroup.name,
-                actorIDs: [serverGroup.actorID],
-                createdAt: serverGroup.createdAt
-            )
-        }
+        groups = serverGroups.map(makeExpenseGroup)
         pruneUnusedNonLocalActors()
         persist()
+    }
+
+    private func applyServerGroup(_ serverGroup: ServerGroup) {
+        let displayName = localActor.displayName
+        localActorID = serverGroup.actorID
+        upsertLocalActor(displayName: displayName)
+
+        let group = makeExpenseGroup(from: serverGroup)
+        if let index = groups.firstIndex(where: { $0.id == group.id }) {
+            groups[index] = group
+        } else {
+            groups.append(group)
+        }
+
+        pruneUnusedNonLocalActors()
+        persist()
+    }
+
+    private func makeExpenseGroup(from serverGroup: ServerGroup) -> ExpenseGroup {
+        ExpenseGroup(
+            id: serverGroup.id,
+            name: serverGroup.name,
+            actorIDs: [serverGroup.actorID],
+            createdAt: serverGroup.createdAt
+        )
     }
 
     nonisolated private static var defaultStorageURL: URL {

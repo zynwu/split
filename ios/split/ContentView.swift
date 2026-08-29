@@ -23,8 +23,6 @@ struct ContentView: View {
                         .font(.caption)
                     LabeledContent("Device ID", value: store.deviceID?.rawValue ?? "Not registered")
                         .font(.caption)
-                    LabeledContent("Actor ID", value: store.localActorID.rawValue)
-                        .font(.caption)
                     LabeledContent("API", value: APIConfiguration.baseURL.absoluteString)
                         .font(.caption)
                 }
@@ -62,14 +60,14 @@ struct ContentView: View {
                 GroupDetailView(store: store, groupID: groupID)
             }
             .onAppear {
-                displayName = store.localActor.displayName
+                displayName = store.displayName
             }
         }
     }
 
     private func saveDisplayName() {
         store.setLocalDisplayName(displayName)
-        displayName = store.localActor.displayName
+        displayName = store.displayName
     }
 
     private func createGroup() {
@@ -105,6 +103,11 @@ private struct GroupDetailView: View {
                     Text(group.joinCode)
                         .font(.title2.monospaced())
                         .fontWeight(.semibold)
+                }
+
+                Section("Your Actor") {
+                    LabeledContent("Actor ID", value: group.localActorID.rawValue)
+                        .font(.caption)
                 }
 
                 Section("Members") {

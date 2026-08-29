@@ -38,24 +38,87 @@ struct ExpenseGroup: Codable, Hashable, Identifiable {
     let id: GroupID
     var name: String
     var joinCode: String
+    var localActorID: ActorID
     var actorIDs: [ActorID]
     let createdAt: Date
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case joinCode
+        case localActorID
+        case actorIDs
+        case createdAt
+    }
+
+    init(id: GroupID, name: String, joinCode: String, localActorID: ActorID, actorIDs: [ActorID], createdAt: Date) {
+        self.id = id
+        self.name = name
+        self.joinCode = joinCode
+        self.localActorID = localActorID
+        self.actorIDs = actorIDs
+        self.createdAt = createdAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(GroupID.self, forKey: .id)
+        self.name = try container.decode(String.self, forKey: .name)
+        self.joinCode = try container.decode(String.self, forKey: .joinCode)
+        self.actorIDs = try container.decode([ActorID].self, forKey: .actorIDs)
+        self.localActorID = try container.decodeIfPresent(ActorID.self, forKey: .localActorID) ?? actorIDs.first ?? .generate()
+        self.createdAt = try container.decode(Date.self, forKey: .createdAt)
+    }
 }
 
 struct DeviceActorLink: Codable, Hashable {
     let deviceID: DeviceID
+    let groupID: GroupID
     let actorID: ActorID
 }
 
 struct SplitSnapshot: Codable {
     var deviceID: DeviceID?
-    var localActorID: ActorID
+    var displayName: String
     var actors: [Actor]
     var groups: [ExpenseGroup]
 
-    var deviceActorLink: DeviceActorLink? {
-        guard let deviceID else { return nil }
-        return DeviceActorLink(deviceID: deviceID, actorID: localActorID)
+    private enum CodingKeys: String, CodingKey {
+        case deviceID
+        case localActorID
+        case displayName
+        case actors
+        case groups
+    }
+
+    init(deviceID: DeviceID?, displayName: String, actors: [Actor], groups: [ExpenseGroup]) {
+        self.deviceID = deviceID
+        self.displayName = displayName
+        self.actors = actors
+        self.groups = groups
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.deviceID = try container.decodeIfPresent(DeviceID.self, forKey: .deviceID)
+        self.actors = try container.decode([Actor].self, forKey: .actors)
+        self.groups = try container.decode([ExpenseGroup].self, forKey: .groups)
+
+        if let displayName = try container.decodeIfPresent(String.self, forKey: .displayName) {
+            self.displayName = displayName
+        } else if let localActor = actors.first(where: { $0.isLocal }) {
+            self.displayName = localActor.displayName
+        } else {
+            self.displayName = "Me"
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(deviceID, forKey: .deviceID)
+        try container.encode(displayName, forKey: .displayName)
+        try container.encode(actors, forKey: .actors)
+        try container.encode(groups, forKey: .groups)
     }
 }
 
@@ -83,7 +146,7 @@ enum RegistrationStatus: Equatable {
 @Observable
 final class SplitStore {
     private(set) var deviceID: DeviceID?
-    private(set) var localActorID: ActorID
+    private(set) var displayName: String
     private(set) var actors: [Actor]
     private(set) var groups: [ExpenseGroup]
     private(set) var registrationStatus: RegistrationStatus = .notStarted
@@ -93,15 +156,6 @@ final class SplitStore {
     @ObservationIgnored private let apiClient: SplitAPIClient
     @ObservationIgnored private let encoder: JSONEncoder
     @ObservationIgnored private let decoder: JSONDecoder
-
-    var localActor: Actor {
-        actors.first { $0.id == localActorID } ?? Actor(id: localActorID, displayName: "Me", deviceID: deviceID, isLocal: true)
-    }
-
-    var deviceActorLink: DeviceActorLink? {
-        guard let deviceID else { return nil }
-        return DeviceActorLink(deviceID: deviceID, actorID: localActorID)
-    }
 
     init(
         storageURL: URL = SplitStore.defaultStorageURL,
@@ -120,15 +174,14 @@ final class SplitStore {
 
         if let snapshot = Self.loadSnapshot(from: storageURL, decoder: decoder) {
             self.deviceID = snapshot.deviceID
-            self.localActorID = snapshot.localActorID
+            self.displayName = snapshot.displayName
             self.actors = snapshot.actors
             self.groups = snapshot.groups
-            ensureLocalActorExists()
+            ensureLocalActorsExist()
         } else {
-            let actorID = ActorID.generate()
             self.deviceID = nil
-            self.localActorID = actorID
-            self.actors = [Actor(id: actorID, displayName: "Me", deviceID: nil, isLocal: true)]
+            self.displayName = "Me"
+            self.actors = []
             self.groups = []
             persist()
         }
@@ -137,28 +190,35 @@ final class SplitStore {
     func prepareForLaunch() async {
         do {
             if try authTokenStore.loadToken() != nil {
-                registrationStatus = deviceID == nil ? .failed("Missing saved device ID") : .registered
+                registrationStatus = .registered
                 refreshGroupsInBackground()
                 return
             }
 
-            registrationStatus = .registering
-            let response = try await apiClient.register()
-            try authTokenStore.saveToken(response.token)
-            applyRegisteredDeviceID(response.deviceID)
-            registrationStatus = .registered
+            try await registerDevice()
             refreshGroupsInBackground()
         } catch {
             registrationStatus = .failed(error.localizedDescription)
         }
     }
 
+    private func registerDevice() async throws {
+        registrationStatus = .registering
+        let response = try await apiClient.register()
+        try authTokenStore.saveToken(response.token)
+        applyRegisteredDeviceID(response.deviceID)
+        registrationStatus = .registered
+    }
+
     func setLocalDisplayName(_ displayName: String) {
         let cleanName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanName.isEmpty else { return }
-        updateActor(id: localActorID) { actor in
-            actor.displayName = cleanName
+
+        self.displayName = cleanName
+        for index in actors.indices where actors[index].isLocal {
+            actors[index].displayName = cleanName
         }
+        persist()
     }
 
     func createGroup(named name: String) async {
@@ -175,12 +235,17 @@ final class SplitStore {
 
     func removeGroup(id: GroupID) {
         groups.removeAll { $0.id == id }
-        pruneUnusedNonLocalActors()
+        pruneUnusedActors()
         persist()
     }
 
     func actor(for actorID: ActorID) -> Actor? {
         actors.first { $0.id == actorID }
+    }
+
+    func deviceActorLink(for groupID: GroupID) -> DeviceActorLink? {
+        guard let deviceID, let group = groups.first(where: { $0.id == groupID }) else { return nil }
+        return DeviceActorLink(deviceID: deviceID, groupID: group.id, actorID: group.localActorID)
     }
 
     private func refreshGroupsInBackground() {
@@ -195,21 +260,20 @@ final class SplitStore {
     }
 
     private func applyServerGroups(_ serverGroups: [ServerGroup]) {
-        let displayName = localActor.displayName
-        if let serverActorID = serverGroups.first?.actorID {
-            localActorID = serverActorID
+        let serverActorIDs = Set(serverGroups.map(\.actorID))
+        actors.removeAll { $0.isLocal && !serverActorIDs.contains($0.id) }
+
+        for serverGroup in serverGroups {
+            upsertLocalActor(id: serverGroup.actorID)
         }
 
-        upsertLocalActor(displayName: displayName)
         groups = serverGroups.map(makeExpenseGroup)
-        pruneUnusedNonLocalActors()
+        pruneUnusedActors()
         persist()
     }
 
     private func applyServerGroup(_ serverGroup: ServerGroup) {
-        let displayName = localActor.displayName
-        localActorID = serverGroup.actorID
-        upsertLocalActor(displayName: displayName)
+        upsertLocalActor(id: serverGroup.actorID)
 
         let group = makeExpenseGroup(from: serverGroup)
         if let index = groups.firstIndex(where: { $0.id == group.id }) {
@@ -218,7 +282,7 @@ final class SplitStore {
             groups.append(group)
         }
 
-        pruneUnusedNonLocalActors()
+        pruneUnusedActors()
         persist()
     }
 
@@ -227,6 +291,7 @@ final class SplitStore {
             id: serverGroup.id,
             name: serverGroup.name,
             joinCode: serverGroup.joinCode,
+            localActorID: serverGroup.actorID,
             actorIDs: [serverGroup.actorID],
             createdAt: serverGroup.createdAt
         )
@@ -244,47 +309,39 @@ final class SplitStore {
 
     private func applyRegisteredDeviceID(_ deviceID: DeviceID) {
         self.deviceID = deviceID
-        updateActor(id: localActorID) { actor in
-            actor.deviceID = deviceID
+        for index in actors.indices where actors[index].isLocal {
+            actors[index].deviceID = deviceID
         }
-    }
-
-    private func ensureLocalActorExists() {
-        if actors.contains(where: { $0.id == localActorID }) {
-            return
-        }
-
-        actors.append(Actor(id: localActorID, displayName: "Me", deviceID: deviceID, isLocal: true))
         persist()
     }
 
-    private func upsertLocalActor(displayName: String) {
-        actors.removeAll { $0.isLocal && $0.id != localActorID }
+    private func ensureLocalActorsExist() {
+        for group in groups {
+            upsertLocalActor(id: group.localActorID)
+        }
+        pruneUnusedActors()
+        persist()
+    }
 
-        if let index = actors.firstIndex(where: { $0.id == localActorID }) {
+    private func upsertLocalActor(id actorID: ActorID) {
+        if let index = actors.firstIndex(where: { $0.id == actorID }) {
             actors[index].displayName = displayName
             actors[index].deviceID = deviceID
         } else {
-            actors.append(Actor(id: localActorID, displayName: displayName, deviceID: deviceID, isLocal: true))
+            actors.append(Actor(id: actorID, displayName: displayName, deviceID: deviceID, isLocal: true))
         }
     }
 
-    private func updateActor(id: ActorID, update: (inout Actor) -> Void) {
-        guard let index = actors.firstIndex(where: { $0.id == id }) else { return }
-        update(&actors[index])
-        persist()
-    }
-
-    private func pruneUnusedNonLocalActors() {
+    private func pruneUnusedActors() {
         let usedActorIDs = Set(groups.flatMap(\.actorIDs))
-        actors.removeAll { !$0.isLocal && !usedActorIDs.contains($0.id) }
+        actors.removeAll { !usedActorIDs.contains($0.id) }
     }
 
     private func persist() {
         do {
             let directoryURL = storageURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
-            let snapshot = SplitSnapshot(deviceID: deviceID, localActorID: localActorID, actors: actors, groups: groups)
+            let snapshot = SplitSnapshot(deviceID: deviceID, displayName: displayName, actors: actors, groups: groups)
             let data = try encoder.encode(snapshot)
             try data.write(to: storageURL, options: [.atomic])
         } catch {

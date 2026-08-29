@@ -78,7 +78,7 @@ struct DeviceActorLink: Codable, Hashable {
 }
 
 struct SplitSnapshot: Codable {
-    var deviceID: DeviceID?
+    var migratedDeviceID: DeviceID?
     var displayName: String
     var actors: [Actor]
     var groups: [ExpenseGroup]
@@ -91,8 +91,8 @@ struct SplitSnapshot: Codable {
         case groups
     }
 
-    init(deviceID: DeviceID?, displayName: String, actors: [Actor], groups: [ExpenseGroup]) {
-        self.deviceID = deviceID
+    init(displayName: String, actors: [Actor], groups: [ExpenseGroup]) {
+        self.migratedDeviceID = nil
         self.displayName = displayName
         self.actors = actors
         self.groups = groups
@@ -100,7 +100,7 @@ struct SplitSnapshot: Codable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.deviceID = try container.decodeIfPresent(DeviceID.self, forKey: .deviceID)
+        self.migratedDeviceID = try container.decodeIfPresent(DeviceID.self, forKey: .deviceID)
         self.actors = try container.decode([Actor].self, forKey: .actors)
         self.groups = try container.decode([ExpenseGroup].self, forKey: .groups)
 
@@ -115,7 +115,6 @@ struct SplitSnapshot: Codable {
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encodeIfPresent(deviceID, forKey: .deviceID)
         try container.encode(displayName, forKey: .displayName)
         try container.encode(actors, forKey: .actors)
         try container.encode(groups, forKey: .groups)
@@ -153,6 +152,7 @@ final class SplitStore {
 
     @ObservationIgnored private let storageURL: URL
     @ObservationIgnored private let authTokenStore: AuthTokenStoring
+    @ObservationIgnored private let deviceIDStore: DeviceIDStoring
     @ObservationIgnored private let apiClient: SplitAPIClient
     @ObservationIgnored private let encoder: JSONEncoder
     @ObservationIgnored private let decoder: JSONDecoder
@@ -160,11 +160,14 @@ final class SplitStore {
     init(
         storageURL: URL = SplitStore.defaultStorageURL,
         authTokenStore: AuthTokenStoring? = nil,
+        deviceIDStore: DeviceIDStoring? = nil,
         apiClient: SplitAPIClient? = nil
     ) {
         let authTokenStore = authTokenStore ?? KeychainAuthTokenStore()
+        let deviceIDStore = deviceIDStore ?? UserDefaultsDeviceIDStore()
         self.storageURL = storageURL
         self.authTokenStore = authTokenStore
+        self.deviceIDStore = deviceIDStore
         self.apiClient = apiClient ?? SplitAPIClient(tokenProvider: authTokenStore.loadToken)
         self.encoder = JSONEncoder()
         self.decoder = JSONDecoder()
@@ -172,14 +175,20 @@ final class SplitStore {
         self.encoder.dateEncodingStrategy = .iso8601
         self.decoder.dateDecodingStrategy = .iso8601
 
+        let savedDeviceID = deviceIDStore.loadDeviceID()
+
         if let snapshot = Self.loadSnapshot(from: storageURL, decoder: decoder) {
-            self.deviceID = snapshot.deviceID
+            let deviceID = savedDeviceID ?? snapshot.migratedDeviceID
+            self.deviceID = deviceID
+            if let deviceID, savedDeviceID == nil {
+                deviceIDStore.saveDeviceID(deviceID)
+            }
             self.displayName = snapshot.displayName
             self.actors = snapshot.actors
             self.groups = snapshot.groups
             ensureLocalActorsExist()
         } else {
-            self.deviceID = nil
+            self.deviceID = savedDeviceID
             self.displayName = "Me"
             self.actors = []
             self.groups = []
@@ -309,6 +318,7 @@ final class SplitStore {
 
     private func applyRegisteredDeviceID(_ deviceID: DeviceID) {
         self.deviceID = deviceID
+        deviceIDStore.saveDeviceID(deviceID)
         for index in actors.indices where actors[index].isLocal {
             actors[index].deviceID = deviceID
         }
@@ -341,7 +351,7 @@ final class SplitStore {
         do {
             let directoryURL = storageURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
-            let snapshot = SplitSnapshot(deviceID: deviceID, displayName: displayName, actors: actors, groups: groups)
+            let snapshot = SplitSnapshot(displayName: displayName, actors: actors, groups: groups)
             let data = try encoder.encode(snapshot)
             try data.write(to: storageURL, options: [.atomic])
         } catch {

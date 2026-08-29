@@ -72,8 +72,10 @@ struct ContentView: View {
                     }
                     .presentationDetents([.medium])
                 case .join:
-                    JoinGroupSheet()
-                        .presentationDetents([.medium])
+                    JoinGroupSheet { joinCode in
+                        await store.joinGroup(with: joinCode)
+                    }
+                    .presentationDetents([.medium])
                 }
             }
         }
@@ -208,6 +210,8 @@ private struct CreateGroupSheet: View {
 private struct JoinGroupSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var joinCode = ""
+    @State private var isJoining = false
+    let joinGroup: (String) async -> Void
 
     var body: some View {
         NavigationStack {
@@ -225,18 +229,27 @@ private struct JoinGroupSheet: View {
                     Button("Cancel") {
                         dismiss()
                     }
+                    .disabled(isJoining)
                 }
 
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Join", action: join)
-                        .disabled(joinCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Button(isJoining ? "Joining" : "Join", action: join)
+                        .disabled(isJoining || joinCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }
     }
 
     private func join() {
-        dismiss()
+        guard !isJoining else { return }
+        let code = joinCode
+        isJoining = true
+
+        Task {
+            await joinGroup(code)
+            isJoining = false
+            dismiss()
+        }
     }
 }
 

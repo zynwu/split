@@ -244,6 +244,18 @@ final class SplitStore {
         }
     }
 
+    func joinGroup(with joinCode: String) async {
+        let cleanCode = joinCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard !cleanCode.isEmpty else { return }
+
+        do {
+            let serverGroup = try await apiClient.joinGroup(with: cleanCode)
+            applyServerGroup(serverGroup)
+        } catch {
+            registrationStatus = .failed(error.localizedDescription)
+        }
+    }
+
     func removeGroup(id: GroupID) {
         groups.removeAll { $0.id == id }
         pruneUnusedActors()

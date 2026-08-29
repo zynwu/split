@@ -40,6 +40,31 @@ func healthHandler(database *database.Database) http.HandlerFunc {
 	}
 }
 
+func listGroupsHandler(database *database.Database) http.HandlerFunc {
+	return func(w http.ResponseWriter, request *http.Request) {
+		deviceID, ok := deviceIDFromContext(request.Context())
+		if !ok {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "authenticated device identity is missing",
+			})
+			return
+		}
+
+		groups, err := database.ListGroupsForDevice(request.Context(), deviceID)
+		if err != nil {
+			log.Printf("listing groups failed: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "could not list groups",
+			})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"groups": groups,
+		})
+	}
+}
+
 func createGroupHandler(database *database.Database) http.HandlerFunc {
 	return func(w http.ResponseWriter, request *http.Request) {
 		var payload createGroupRequest
@@ -59,7 +84,15 @@ func createGroupHandler(database *database.Database) http.HandlerFunc {
 			return
 		}
 
-		group, err := database.CreateGroup(request.Context(), name)
+		deviceID, ok := deviceIDFromContext(request.Context())
+		if !ok {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "authenticated device identity is missing",
+			})
+			return
+		}
+
+		group, err := database.CreateGroup(request.Context(), name, deviceID)
 		if err != nil {
 			log.Printf("creating group failed: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{

@@ -30,6 +30,32 @@ struct RegisterResponse: Decodable {
     }
 }
 
+struct GroupsResponse: Decodable {
+    let groups: [ServerGroup]
+}
+
+struct ServerGroup: Decodable {
+    let id: GroupID
+    let name: String
+    let createdAt: Date
+    let actorID: ActorID
+
+    private enum CodingKeys: String, CodingKey {
+        case uuid
+        case name
+        case creation_date
+        case actor_uuid
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = GroupID(rawValue: try container.decode(String.self, forKey: .uuid))
+        self.name = try container.decode(String.self, forKey: .name)
+        self.createdAt = try container.decode(Date.self, forKey: .creation_date)
+        self.actorID = ActorID(rawValue: try container.decode(String.self, forKey: .actor_uuid))
+    }
+}
+
 struct SplitAPIClient {
     private let baseURL: URL
     private let session: URLSession
@@ -56,6 +82,12 @@ struct SplitAPIClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         return try await send(request)
+    }
+
+    func fetchGroups() async throws -> [ServerGroup] {
+        let request = try authorizedRequest(path: "/groups")
+        let response: GroupsResponse = try await send(request)
+        return response.groups
     }
 
     func authorizedRequest(path: String, method: String = "GET") throws -> URLRequest {

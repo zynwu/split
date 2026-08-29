@@ -137,6 +137,7 @@ final class SplitStore {
         do {
             if try authTokenStore.loadToken() != nil {
                 registrationStatus = deviceID == nil ? .failed("Missing saved device ID") : .registered
+                refreshGroupsInBackground()
                 return
             }
 
@@ -145,6 +146,7 @@ final class SplitStore {
             try authTokenStore.saveToken(response.token)
             applyRegisteredDeviceID(response.deviceID)
             registrationStatus = .registered
+            refreshGroupsInBackground()
         } catch {
             registrationStatus = .failed(error.localizedDescription)
         }
@@ -175,6 +177,36 @@ final class SplitStore {
         actors.first { $0.id == actorID }
     }
 
+    private func refreshGroupsInBackground() {
+        Task {
+            do {
+                let serverGroups = try await apiClient.fetchGroups()
+                applyServerGroups(serverGroups)
+            } catch {
+                // Keep showing local groups when a background refresh fails.
+            }
+        }
+    }
+
+    private func applyServerGroups(_ serverGroups: [ServerGroup]) {
+        let displayName = localActor.displayName
+        if let serverActorID = serverGroups.first?.actorID {
+            localActorID = serverActorID
+        }
+
+        upsertLocalActor(displayName: displayName)
+        groups = serverGroups.map { serverGroup in
+            ExpenseGroup(
+                id: serverGroup.id,
+                name: serverGroup.name,
+                actorIDs: [serverGroup.actorID],
+                createdAt: serverGroup.createdAt
+            )
+        }
+        pruneUnusedNonLocalActors()
+        persist()
+    }
+
     nonisolated private static var defaultStorageURL: URL {
         let baseURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return baseURL.appending(path: "split", directoryHint: .isDirectory).appending(path: "local-state.json")
@@ -199,6 +231,17 @@ final class SplitStore {
 
         actors.append(Actor(id: localActorID, displayName: "Me", deviceID: deviceID, isLocal: true))
         persist()
+    }
+
+    private func upsertLocalActor(displayName: String) {
+        actors.removeAll { $0.isLocal && $0.id != localActorID }
+
+        if let index = actors.firstIndex(where: { $0.id == localActorID }) {
+            actors[index].displayName = displayName
+            actors[index].deviceID = deviceID
+        } else {
+            actors.append(Actor(id: localActorID, displayName: displayName, deviceID: deviceID, isLocal: true))
+        }
     }
 
     private func updateActor(id: ActorID, update: (inout Actor) -> Void) {

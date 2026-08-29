@@ -2,9 +2,9 @@ import Foundation
 
 enum APIConfiguration {
     #if DEBUG
-    static let baseURL = makeURL("http://localhost:8080")
+    static let baseURL = makeURL("http://localhost:8080/api")
     #else
-    static let baseURL = makeURL("https://api.example.com")
+    static let baseURL = makeURL("https://api.example.com/api")
     #endif
 
     static func url(for path: String) -> URL {

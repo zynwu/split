@@ -7,6 +7,9 @@ struct splitApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView(store: store)
+                .task {
+                    await store.prepareForLaunch()
+                }
         }
     }
 }

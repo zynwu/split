@@ -18,7 +18,9 @@ struct ContentView: View {
                             .disabled(displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
 
-                    LabeledContent("Device ID", value: store.deviceID.rawValue)
+                    LabeledContent("Registration", value: store.registrationStatus.label)
+                        .font(.caption)
+                    LabeledContent("Device ID", value: store.deviceID?.rawValue ?? "Not registered")
                         .font(.caption)
                     LabeledContent("Actor ID", value: store.localActorID.rawValue)
                         .font(.caption)

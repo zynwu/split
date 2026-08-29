@@ -5,10 +5,6 @@ struct DeviceID: RawRepresentable, Codable, Hashable, Identifiable {
     let rawValue: String
 
     var id: String { rawValue }
-
-    static func generate() -> DeviceID {
-        DeviceID(rawValue: UUID().uuidString)
-    }
 }
 
 struct ActorID: RawRepresentable, Codable, Hashable, Identifiable {
@@ -34,7 +30,7 @@ struct GroupID: RawRepresentable, Codable, Hashable, Identifiable {
 struct Actor: Codable, Hashable, Identifiable {
     let id: ActorID
     var displayName: String
-    let deviceID: DeviceID?
+    var deviceID: DeviceID?
     let isLocal: Bool
 }
 
@@ -51,24 +47,49 @@ struct DeviceActorLink: Codable, Hashable {
 }
 
 struct SplitSnapshot: Codable {
-    var deviceID: DeviceID
+    var deviceID: DeviceID?
     var localActorID: ActorID
     var actors: [Actor]
     var groups: [ExpenseGroup]
 
-    var deviceActorLink: DeviceActorLink {
-        DeviceActorLink(deviceID: deviceID, actorID: localActorID)
+    var deviceActorLink: DeviceActorLink? {
+        guard let deviceID else { return nil }
+        return DeviceActorLink(deviceID: deviceID, actorID: localActorID)
     }
 }
 
+enum RegistrationStatus: Equatable {
+    case notStarted
+    case registering
+    case registered
+    case failed(String)
+
+    var label: String {
+        switch self {
+        case .notStarted:
+            "Not started"
+        case .registering:
+            "Registering"
+        case .registered:
+            "Registered"
+        case .failed(let message):
+            "Failed: \(message)"
+        }
+    }
+}
+
+@MainActor
 @Observable
 final class SplitStore {
-    private(set) var deviceID: DeviceID
+    private(set) var deviceID: DeviceID?
     private(set) var localActorID: ActorID
     private(set) var actors: [Actor]
     private(set) var groups: [ExpenseGroup]
+    private(set) var registrationStatus: RegistrationStatus = .notStarted
 
     @ObservationIgnored private let storageURL: URL
+    @ObservationIgnored private let authTokenStore: AuthTokenStoring
+    @ObservationIgnored private let apiClient: SplitAPIClient
     @ObservationIgnored private let encoder: JSONEncoder
     @ObservationIgnored private let decoder: JSONDecoder
 
@@ -76,12 +97,20 @@ final class SplitStore {
         actors.first { $0.id == localActorID } ?? Actor(id: localActorID, displayName: "Me", deviceID: deviceID, isLocal: true)
     }
 
-    var deviceActorLink: DeviceActorLink {
-        DeviceActorLink(deviceID: deviceID, actorID: localActorID)
+    var deviceActorLink: DeviceActorLink? {
+        guard let deviceID else { return nil }
+        return DeviceActorLink(deviceID: deviceID, actorID: localActorID)
     }
 
-    init(storageURL: URL = SplitStore.defaultStorageURL) {
+    init(
+        storageURL: URL = SplitStore.defaultStorageURL,
+        authTokenStore: AuthTokenStoring? = nil,
+        apiClient: SplitAPIClient? = nil
+    ) {
+        let authTokenStore = authTokenStore ?? KeychainAuthTokenStore()
         self.storageURL = storageURL
+        self.authTokenStore = authTokenStore
+        self.apiClient = apiClient ?? SplitAPIClient(tokenProvider: authTokenStore.loadToken)
         self.encoder = JSONEncoder()
         self.decoder = JSONDecoder()
         self.encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -95,13 +124,29 @@ final class SplitStore {
             self.groups = snapshot.groups
             ensureLocalActorExists()
         } else {
-            let deviceID = DeviceID.generate()
             let actorID = ActorID.generate()
-            self.deviceID = deviceID
+            self.deviceID = nil
             self.localActorID = actorID
-            self.actors = [Actor(id: actorID, displayName: "Me", deviceID: deviceID, isLocal: true)]
+            self.actors = [Actor(id: actorID, displayName: "Me", deviceID: nil, isLocal: true)]
             self.groups = []
             persist()
+        }
+    }
+
+    func prepareForLaunch() async {
+        do {
+            if try authTokenStore.loadToken() != nil {
+                registrationStatus = deviceID == nil ? .failed("Missing saved device ID") : .registered
+                return
+            }
+
+            registrationStatus = .registering
+            let response = try await apiClient.register()
+            try authTokenStore.saveToken(response.token)
+            applyRegisteredDeviceID(response.deviceID)
+            registrationStatus = .registered
+        } catch {
+            registrationStatus = .failed(error.localizedDescription)
         }
     }
 
@@ -126,12 +171,11 @@ final class SplitStore {
         persist()
     }
 
-
     func actor(for actorID: ActorID) -> Actor? {
         actors.first { $0.id == actorID }
     }
 
-    private static var defaultStorageURL: URL {
+    nonisolated private static var defaultStorageURL: URL {
         let baseURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return baseURL.appending(path: "split", directoryHint: .isDirectory).appending(path: "local-state.json")
     }
@@ -139,6 +183,13 @@ final class SplitStore {
     private static func loadSnapshot(from url: URL, decoder: JSONDecoder) -> SplitSnapshot? {
         guard let data = try? Data(contentsOf: url) else { return nil }
         return try? decoder.decode(SplitSnapshot.self, from: data)
+    }
+
+    private func applyRegisteredDeviceID(_ deviceID: DeviceID) {
+        self.deviceID = deviceID
+        updateActor(id: localActorID) { actor in
+            actor.deviceID = deviceID
+        }
     }
 
     private func ensureLocalActorExists() {

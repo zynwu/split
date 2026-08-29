@@ -1,5 +1,9 @@
 import Foundation
 
+enum DeviceIDStorageKey {
+    static let deviceID = "deviceID"
+}
+
 protocol DeviceIDStoring {
     func loadDeviceID() -> DeviceID?
     func saveDeviceID(_ deviceID: DeviceID)
@@ -7,7 +11,7 @@ protocol DeviceIDStoring {
 
 struct UserDefaultsDeviceIDStore: DeviceIDStoring {
     private let userDefaults: UserDefaults
-    private let key = "deviceID"
+    private let key = DeviceIDStorageKey.deviceID
 
     init(userDefaults: UserDefaults = .standard) {
         self.userDefaults = userDefaults

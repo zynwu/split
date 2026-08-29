@@ -200,11 +200,13 @@ final class SplitStore {
         do {
             if try authTokenStore.loadToken() != nil {
                 registrationStatus = .registered
+                refreshDeviceInBackground()
                 refreshGroupsInBackground()
                 return
             }
 
             try await registerDevice()
+            refreshDeviceInBackground()
             refreshGroupsInBackground()
         } catch {
             registrationStatus = .failed(error.localizedDescription)
@@ -255,6 +257,17 @@ final class SplitStore {
     func deviceActorLink(for groupID: GroupID) -> DeviceActorLink? {
         guard let deviceID, let group = groups.first(where: { $0.id == groupID }) else { return nil }
         return DeviceActorLink(deviceID: deviceID, groupID: group.id, actorID: group.localActorID)
+    }
+
+    private func refreshDeviceInBackground() {
+        Task {
+            do {
+                let deviceID = try await apiClient.fetchDevice()
+                applyRegisteredDeviceID(deviceID)
+            } catch {
+                // Keep showing the locally saved device ID when a background refresh fails.
+            }
+        }
     }
 
     private func refreshGroupsInBackground() {

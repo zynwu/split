@@ -30,6 +30,19 @@ struct RegisterResponse: Decodable {
     }
 }
 
+struct DeviceResponse: Decodable {
+    let deviceID: DeviceID
+
+    private enum CodingKeys: String, CodingKey {
+        case device_id
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.deviceID = DeviceID(rawValue: try container.decode(String.self, forKey: .device_id))
+    }
+}
+
 struct GroupsResponse: Decodable {
     let groups: [ServerGroup]
 }
@@ -89,6 +102,12 @@ struct SplitAPIClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         return try await send(request)
+    }
+
+    func fetchDevice() async throws -> DeviceID {
+        let request = try authorizedRequest(path: "/device")
+        let response: DeviceResponse = try await send(request)
+        return response.deviceID
     }
 
     func fetchGroups() async throws -> [ServerGroup] {

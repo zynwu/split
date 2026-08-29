@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @Bindable var store: SplitStore
+    @AppStorage(DeviceIDStorageKey.deviceID) private var storedDeviceID = ""
     @State private var displayName: String = ""
     @State private var newGroupName: String = ""
     @State private var isCreatingGroup = false
@@ -21,7 +22,7 @@ struct ContentView: View {
 
                     LabeledContent("Registration", value: store.registrationStatus.label)
                         .font(.caption)
-                    LabeledContent("Device ID", value: store.deviceID?.rawValue ?? "Not registered")
+                    LabeledContent("Device ID", value: storedDeviceID.isEmpty ? "Not registered" : storedDeviceID)
                         .font(.caption)
                     LabeledContent("API", value: APIConfiguration.baseURL.absoluteString)
                         .font(.caption)

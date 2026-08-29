@@ -16,6 +16,10 @@ type registerResponse struct {
 	TokenType string `json:"token_type"`
 }
 
+type deviceResponse struct {
+	DeviceID string `json:"device_id"`
+}
+
 func registerHandler(database *database.Database) http.HandlerFunc {
 	return func(w http.ResponseWriter, request *http.Request) {
 		registration, err := database.RegisterDevice(request.Context())
@@ -33,6 +37,18 @@ func registerHandler(database *database.Database) http.HandlerFunc {
 			TokenType: "Bearer",
 		})
 	}
+}
+
+func deviceHandler(w http.ResponseWriter, request *http.Request) {
+	deviceID, ok := deviceIDFromContext(request.Context())
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "authenticated device identity is missing",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, deviceResponse{DeviceID: deviceID})
 }
 
 type deviceIDContextKey struct{}

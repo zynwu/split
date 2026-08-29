@@ -56,6 +56,7 @@ func newHTTPServer(address string, db *database.Database) *http.Server {
 	mux.HandleFunc("POST /api/register", registerHandler(db))
 	mux.HandleFunc("GET /api/healthz", healthHandler(db))
 	mux.Handle("GET /api/", requireDeviceAuth(db, http.HandlerFunc(rootHandler)))
+	mux.Handle("GET /api/device", requireDeviceAuth(db, http.HandlerFunc(deviceHandler)))
 	mux.Handle("GET /api/groups", requireDeviceAuth(db, listGroupsHandler(db)))
 	mux.Handle("POST /api/groups/join", requireDeviceAuth(db, joinGroupHandler(db)))
 	mux.Handle("POST /api/groups", requireDeviceAuth(db, createGroupHandler(db)))

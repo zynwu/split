@@ -24,8 +24,22 @@ curl -X POST http://localhost:8080/api/register
 ```
 
 The response contains a `device_id` and an `auth_token`. Store the token in
-the iOS Keychain and send it as a bearer token on application requests. For
-example, create a group with:
+the iOS Keychain and send it as a bearer token on application requests.
+
+To resolve the device ID associated with a stored token:
+
+```sh
+curl http://localhost:8080/api/device \
+  -H 'Authorization: Bearer <auth_token-from-register>'
+```
+
+The response is:
+
+```json
+{"device_id":"<device-id-from-register>"}
+```
+
+Create a group with:
 
 ```sh
 curl -X POST http://localhost:8080/api/groups \

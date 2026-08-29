@@ -42,9 +42,18 @@ curl http://localhost:8080/api/groups \
 ```
 
 The response contains each group's `uuid`, `name`, `creation_date`, and the
-current device's `actor_uuid` for that group. The group UUID is used for future
-group requests, while the actor UUID identifies this member when creating
-transactions or other group data.
+current device's `actor_uuid` and `join_code` for that group. The group UUID is
+used for future group requests, while the actor UUID identifies this member
+when creating transactions or other group data.
+
+Join another group with its six-letter join code:
+
+```sh
+curl -X POST http://localhost:8080/api/groups/join \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <auth_token-from-register>' \
+  -d '{"join_code":"ABCDXY"}'
+```
 
 `POST /api/register` and `GET /api/healthz` are public. Other current API routes
 require the bearer token. The server stores only a hash of the token; whoever
@@ -73,13 +82,14 @@ docker compose up -d --build api
 ## Data model
 
 The API currently creates rows in `groups`, which has a UUID, name, and
-creation timestamp. Creating a group also creates the creator's durable actor
-identity and active device binding. `group_actors` stores the durable actor
-identity for each group member. `devices` stores normally stable device
-identifiers, and `actor_device_bindings` records the history of which device
-represented which actor when a device is replaced or an actor is reclaimed.
-Transactions should reference both `actor_uuid` and `device_id` so identity
-corrections do not erase device history.
+creation timestamp and a unique six-letter join code. Creating a group also
+creates the creator's durable actor identity and active device binding.
+`group_actors` stores the durable actor identity for each group member.
+`devices` stores normally stable device identifiers, and
+`actor_device_bindings` records the history of which device represented which
+actor when a device is replaced or an actor is reclaimed. Transactions should
+reference both `actor_uuid` and `device_id` so identity corrections do not
+erase device history.
 
 Stop the containers with:
 

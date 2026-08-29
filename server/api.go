@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -14,6 +15,10 @@ import (
 
 type createGroupRequest struct {
 	Name string `json:"name"`
+}
+
+type joinGroupRequest struct {
+	JoinCode string `json:"join_code"`
 }
 
 func rootHandler(w http.ResponseWriter, _ *http.Request) {
@@ -63,6 +68,68 @@ func listGroupsHandler(database *database.Database) http.HandlerFunc {
 			"groups": groups,
 		})
 	}
+}
+
+func joinGroupHandler(db *database.Database) http.HandlerFunc {
+	return func(w http.ResponseWriter, request *http.Request) {
+		var payload joinGroupRequest
+		decoder := json.NewDecoder(io.LimitReader(request.Body, 1<<20))
+		if err := decoder.Decode(&payload); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "request body must be valid JSON with a join_code",
+			})
+			return
+		}
+
+		joinCode, ok := normalizeJoinCode(payload.JoinCode)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "join_code must be six letters",
+			})
+			return
+		}
+
+		deviceID, ok := deviceIDFromContext(request.Context())
+		if !ok {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "authenticated device identity is missing",
+			})
+			return
+		}
+
+		group, err := db.JoinGroup(request.Context(), deviceID, joinCode)
+		if err != nil {
+			if errors.Is(err, database.ErrGroupNotFound) {
+				writeJSON(w, http.StatusNotFound, map[string]string{
+					"error": "group not found",
+				})
+				return
+			}
+
+			log.Printf("joining group failed: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "could not join group",
+			})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, group)
+	}
+}
+
+func normalizeJoinCode(value string) (string, bool) {
+	code := strings.ToUpper(strings.TrimSpace(value))
+	if len(code) != 6 {
+		return "", false
+	}
+
+	for _, character := range code {
+		if !strings.ContainsRune("ABCDEFGHJKLMNPQRSTUVWXYZ", character) {
+			return "", false
+		}
+	}
+
+	return code, true
 }
 
 func createGroupHandler(database *database.Database) http.HandlerFunc {

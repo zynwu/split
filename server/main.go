@@ -53,9 +53,10 @@ func main() {
 
 func newHTTPServer(address string, db *database.Database) *http.Server {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /", rootHandler)
+	mux.HandleFunc("POST /register", registerHandler(db))
 	mux.HandleFunc("GET /healthz", healthHandler(db))
-	mux.HandleFunc("POST /groups", createGroupHandler(db))
+	mux.Handle("GET /", requireDeviceAuth(db, http.HandlerFunc(rootHandler)))
+	mux.Handle("POST /groups", requireDeviceAuth(db, createGroupHandler(db)))
 
 	return &http.Server{
 		Addr:              address,

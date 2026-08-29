@@ -22,6 +22,8 @@ struct ContentView: View {
                         .font(.caption)
                     LabeledContent("Actor ID", value: store.localActorID.rawValue)
                         .font(.caption)
+                    LabeledContent("API", value: APIConfiguration.baseURL.absoluteString)
+                        .font(.caption)
                 }
 
                 Section("Groups") {

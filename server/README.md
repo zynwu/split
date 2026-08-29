@@ -20,7 +20,7 @@ docker compose logs -f api
 The API listens on port `8080` by default. Register a device with:
 
 ```sh
-curl -X POST http://localhost:8080/register
+curl -X POST http://localhost:8080/api/register
 ```
 
 The response contains a `device_id` and an `auth_token`. Store the token in
@@ -28,17 +28,17 @@ the iOS Keychain and send it as a bearer token on application requests. For
 example, create a group with:
 
 ```sh
-curl -X POST http://localhost:8080/groups \
+curl -X POST http://localhost:8080/api/groups \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer <auth_token-from-register>' \
   -d '{"name":"Weekend trip"}'
 ```
 
-`POST /register` and `GET /healthz` are public. Other current API routes
+`POST /api/register` and `GET /api/healthz` are public. Other current API routes
 require the bearer token. The server stores only a hash of the token; whoever
 possesses the token can act as that device, so it must be kept private.
 
-Health check: `GET http://localhost:8080/healthz`
+Health check: `GET http://localhost:8080/api/healthz`
 
 ## Database migrations
 

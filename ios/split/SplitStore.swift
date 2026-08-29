@@ -37,6 +37,7 @@ struct Actor: Codable, Hashable, Identifiable {
 struct ExpenseGroup: Codable, Hashable, Identifiable {
     let id: GroupID
     var name: String
+    var joinCode: String
     var actorIDs: [ActorID]
     let createdAt: Date
 }
@@ -225,6 +226,7 @@ final class SplitStore {
         ExpenseGroup(
             id: serverGroup.id,
             name: serverGroup.name,
+            joinCode: serverGroup.joinCode,
             actorIDs: [serverGroup.actorID],
             createdAt: serverGroup.createdAt
         )

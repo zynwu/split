@@ -42,12 +42,14 @@ struct ServerGroup: Decodable {
     let id: GroupID
     let name: String
     let createdAt: Date
+    let joinCode: String
     let actorID: ActorID
 
     private enum CodingKeys: String, CodingKey {
         case uuid
         case name
         case creation_date
+        case join_code
         case actor_uuid
     }
 
@@ -56,6 +58,7 @@ struct ServerGroup: Decodable {
         self.id = GroupID(rawValue: try container.decode(String.self, forKey: .uuid))
         self.name = try container.decode(String.self, forKey: .name)
         self.createdAt = try container.decode(Date.self, forKey: .creation_date)
+        self.joinCode = try container.decode(String.self, forKey: .join_code)
         self.actorID = ActorID(rawValue: try container.decode(String.self, forKey: .actor_uuid))
     }
 }

@@ -101,6 +101,12 @@ private struct GroupDetailView: View {
     var body: some View {
         List {
             if let group {
+                Section("Join Code") {
+                    Text(group.joinCode)
+                        .font(.title2.monospaced())
+                        .fontWeight(.semibold)
+                }
+
                 Section("Members") {
                     ForEach(group.actorIDs, id: \.self) { actorID in
                         if let actor = store.actor(for: actorID) {

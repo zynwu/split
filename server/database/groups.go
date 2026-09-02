@@ -62,7 +62,7 @@ func (database *Database) createGroupAttempt(ctx context.Context, name, deviceID
 		INSERT INTO groups (uuid, name, join_code)
 		VALUES ($1, $2, $3)
 		ON CONFLICT (join_code) DO NOTHING
-		RETURNING uuid, name, creation_date, join_code`
+		RETURNING uuid, name, creation_date, join_code, latest_event_sequence`
 
 	var group Group
 	err = tx.QueryRowContext(ctx, groupQuery, groupUUID.String(), name, joinCode).Scan(
@@ -70,6 +70,7 @@ func (database *Database) createGroupAttempt(ctx context.Context, name, deviceID
 		&group.Name,
 		&group.CreationDate,
 		&group.JoinCode,
+		&group.LatestEventSequence,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return GroupMembership{}, true, nil
@@ -103,6 +104,7 @@ func (database *Database) createGroupAttempt(ctx context.Context, name, deviceID
 func (database *Database) ListGroupsForDevice(ctx context.Context, deviceID string) ([]GroupWithActors, error) {
 	const query = `
 		SELECT g.uuid, g.name, g.creation_date, g.join_code,
+			g.latest_event_sequence,
 			current_binding.actor_uuid,
 			a.actor_uuid, COALESCE(a.display_name, '')
 		FROM actor_device_bindings AS current_binding
@@ -135,6 +137,7 @@ func (database *Database) ListGroupsForDevice(ctx context.Context, deviceID stri
 			&group.Name,
 			&group.CreationDate,
 			&group.JoinCode,
+			&group.LatestEventSequence,
 			&currentActorUUID,
 			&actor.ActorUUID,
 			&actor.DisplayName,
@@ -170,7 +173,7 @@ func (database *Database) JoinGroup(ctx context.Context, deviceID, joinCode stri
 	// both create a new actor before seeing the other's binding.
 	var group Group
 	err = groupTransaction.QueryRowContext(ctx, `
-		SELECT uuid, name, creation_date, join_code
+		SELECT uuid, name, creation_date, join_code, latest_event_sequence
 		FROM groups
 		WHERE join_code = $1
 		FOR UPDATE`, joinCode).Scan(
@@ -178,6 +181,7 @@ func (database *Database) JoinGroup(ctx context.Context, deviceID, joinCode stri
 		&group.Name,
 		&group.CreationDate,
 		&group.JoinCode,
+		&group.LatestEventSequence,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return GroupMembership{}, ErrGroupNotFound

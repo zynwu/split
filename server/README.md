@@ -56,7 +56,7 @@ curl http://localhost:8080/api/groups \
 ```
 
 The response contains each group's `uuid`, `name`, `creation_date`, the
-current device's `actor_uuid`, and `join_code`, plus an `actors` array containing
+current device's `actor_uuid`, `join_code`, and `latest_event_sequence`, plus an `actors` array containing
 every active actor in that group. Each actor has an `actor_uuid` and optional
 display name. The group UUID is used for future group requests, while the actor
 UUID identifies a member when creating transactions or other group data.
@@ -73,6 +73,78 @@ curl -X POST http://localhost:8080/api/groups/join \
 `POST /api/register` and `GET /api/healthz` are public. Other current API routes
 require the bearer token. The server stores only a hash of the token; whoever
 possesses the token can act as that device, so it must be kept private.
+
+### Expense ledger
+
+Expenses are written as immutable ledger events and read from the server's
+materialized `expenses` projection. An event can be retried safely: resend the
+same `event_uuid` and `client_sequence` after a network failure instead of
+creating a new event.
+
+Create an expense with `POST /api/groups/<group-uuid>/events`:
+
+```sh
+curl -X POST "http://localhost:8080/api/groups/<group-uuid>/events" \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <auth_token-from-register>' \
+  -d '{
+    "event_uuid":"<new-event-uuid>",
+    "entity_type":"expense",
+    "entity_uuid":"<new-expense-uuid>",
+    "event_type":"expense.created",
+    "actor_uuid":"<authenticated-member-actor-uuid>",
+    "client_sequence":0,
+    "base_sequence":0,
+    "payload_version":1,
+    "payload":{
+      "name":"Dinner",
+      "description":"Friday dinner",
+      "currency_code":"USD",
+      "total_minor_units":4200,
+      "payer_actor_uuid":"<payer-actor-uuid>",
+      "split_method":"equal",
+      "split_config":{},
+      "occurred_at":"2026-09-01T19:30:00Z",
+      "splits":[
+        {"actor_uuid":"<actor-1-uuid>"},
+        {"actor_uuid":"<actor-2-uuid>"}
+      ]
+    }
+  }'
+```
+
+Amounts are integer minor units (`4200` means `$42.00`), so no floating-point
+currency values are stored. Equal splits are calculated deterministically by
+the server. Manual splits must include `amount_minor_units` for every split
+and sum exactly to `total_minor_units`. The `currency_code` is an uppercase
+three-letter code such as `USD` or `EUR`.
+
+Use the expense projection for the current group state:
+
+```sh
+curl "http://localhost:8080/api/groups/<group-uuid>/expenses" \
+  -H 'Authorization: Bearer <auth_token-from-register>'
+```
+
+For offline synchronization, keep the returned group event cursor locally and
+pull events after it:
+
+```sh
+curl "http://localhost:8080/api/groups/<group-uuid>/events?after=0&limit=100" \
+  -H 'Authorization: Bearer <auth_token-from-register>'
+```
+
+The server assigns a monotonically increasing `sequence` per group. Each
+accepted event is retained, and the projection applies the last event received
+by the server for an expense. If `base_sequence` is older than the expense's
+current `version`, the event is still retained and applied but the response has
+`"conflict":true`; this is the initial last-arrival-wins policy.
+
+For an edit, keep the same `entity_uuid`, use a new `event_uuid` and the next
+device `client_sequence`, and set `base_sequence` to the expense's current
+`version`. To void an expense, use `event_type:"expense.voided"` with an empty
+object payload. Voiding keeps the expense and its history available; the
+projection returns its `voided_at` timestamp.
 
 Health check: `GET http://localhost:8080/api/healthz`
 

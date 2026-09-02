@@ -120,6 +120,88 @@ struct ServerGroup: Decodable {
     }
 }
 
+struct GroupBalancesResponse: Decodable, Hashable {
+    let groupID: GroupID
+    let currentActorID: ActorID
+    let asOfSequence: Int64
+    let currencyBalances: [CurrencyBalance]
+
+    private enum CodingKeys: String, CodingKey {
+        case group_uuid
+        case current_actor_uuid
+        case as_of_sequence
+        case currency_balances
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.groupID = GroupID(rawValue: try container.decode(String.self, forKey: .group_uuid))
+        self.currentActorID = ActorID(rawValue: try container.decode(String.self, forKey: .current_actor_uuid))
+        self.asOfSequence = try container.decode(Int64.self, forKey: .as_of_sequence)
+        self.currencyBalances = try container.decode([CurrencyBalance].self, forKey: .currency_balances)
+    }
+}
+
+struct CurrencyBalance: Decodable, Hashable, Identifiable {
+    var id: String { currencyCode }
+    let currencyCode: String
+    let memberBalances: [BalanceMember]
+    let suggestedTransfers: [SuggestedTransfer]
+
+    private enum CodingKeys: String, CodingKey {
+        case currency_code
+        case member_balances
+        case suggested_transfers
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.currencyCode = try container.decode(String.self, forKey: .currency_code)
+        self.memberBalances = try container.decode([BalanceMember].self, forKey: .member_balances)
+        self.suggestedTransfers = try container.decode([SuggestedTransfer].self, forKey: .suggested_transfers)
+    }
+}
+
+struct BalanceMember: Decodable, Hashable, Identifiable {
+    var id: ActorID { actorID }
+    let actorID: ActorID
+    let displayName: String
+    let netMinorUnits: Int64
+
+    private enum CodingKeys: String, CodingKey {
+        case actor_uuid
+        case display_name
+        case net_minor_units
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.actorID = ActorID(rawValue: try container.decode(String.self, forKey: .actor_uuid))
+        self.displayName = try container.decodeIfPresent(String.self, forKey: .display_name) ?? ""
+        self.netMinorUnits = try container.decode(Int64.self, forKey: .net_minor_units)
+    }
+}
+
+struct SuggestedTransfer: Decodable, Hashable, Identifiable {
+    var id: String { "\(fromActorID.rawValue)-\(toActorID.rawValue)" }
+    let fromActorID: ActorID
+    let toActorID: ActorID
+    let amountMinorUnits: Int64
+
+    private enum CodingKeys: String, CodingKey {
+        case from_actor_uuid
+        case to_actor_uuid
+        case amount_minor_units
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.fromActorID = ActorID(rawValue: try container.decode(String.self, forKey: .from_actor_uuid))
+        self.toActorID = ActorID(rawValue: try container.decode(String.self, forKey: .to_actor_uuid))
+        self.amountMinorUnits = try container.decode(Int64.self, forKey: .amount_minor_units)
+    }
+}
+
 enum JSONValue: Codable, Hashable {
     case string(String)
     case number(Double)
@@ -522,6 +604,11 @@ struct SplitAPIClient {
         let request = try authorizedRequest(path: "/groups/\(groupID.rawValue)/expenses")
         let response: ExpensesResponse = try await send(request)
         return response.expenses
+    }
+
+    func fetchBalances(groupID: GroupID) async throws -> GroupBalancesResponse {
+        let request = try authorizedRequest(path: "/groups/\(groupID.rawValue)/balances")
+        return try await send(request)
     }
 
     func postExpenseEvent(groupID: GroupID, event: ExpenseEventRequest) async throws -> PostEventResponse {

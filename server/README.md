@@ -132,6 +132,20 @@ curl "http://localhost:8080/api/groups/<group-uuid>/expenses" \
   -H 'Authorization: Bearer <auth_token-from-register>'
 ```
 
+Get the current derived balances and deterministic simplified transfers:
+
+```sh
+curl "http://localhost:8080/api/groups/<group-uuid>/balances" \
+  -H 'Authorization: Bearer <auth_token-from-register>'
+```
+
+The response contains an `as_of_sequence` watermark and one balance bucket per
+currency. A positive `net_minor_units` means the group owes that actor; a
+negative value means the actor owes the group. `suggested_transfers` reduces
+those net balances into direct payments. The current default is USD when a
+group has no expenses, while expenses in other currencies remain in separate
+native-currency buckets until exchange-rate conversion is introduced.
+
 For offline synchronization, keep the returned group event cursor locally and
 pull events after it:
 

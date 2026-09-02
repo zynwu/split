@@ -61,6 +61,7 @@ func newHTTPServer(address string, db *database.Database) *http.Server {
 	mux.Handle("POST /api/groups/{group_uuid}/events", requireDeviceAuth(db, http.HandlerFunc(appendLedgerEventHandler(db))))
 	mux.Handle("GET /api/groups/{group_uuid}/events", requireDeviceAuth(db, http.HandlerFunc(listLedgerEventsHandler(db))))
 	mux.Handle("GET /api/groups/{group_uuid}/expenses", requireDeviceAuth(db, http.HandlerFunc(listExpensesHandler(db))))
+	mux.Handle("GET /api/groups/{group_uuid}/balances", requireDeviceAuth(db, http.HandlerFunc(listGroupBalancesHandler(db))))
 	mux.Handle("POST /api/groups/join", requireDeviceAuth(db, joinGroupHandler(db)))
 	mux.Handle("POST /api/groups", requireDeviceAuth(db, createGroupHandler(db)))
 

@@ -256,54 +256,267 @@ private struct JoinGroupSheet: View {
 private struct GroupDetailView: View {
     @Bindable var store: SplitStore
     let groupID: GroupID
+    @State private var isShowingAddExpense = false
 
     private var group: ExpenseGroup? {
         store.groups.first { $0.id == groupID }
     }
 
+    private var groupActors: [Actor] {
+        guard let group else { return [] }
+        return group.actorIDs.compactMap { store.actor(for: $0) }
+    }
+
+    private var groupExpenses: [ExpenseRecord] {
+        store.expenses(for: groupID)
+    }
+
     var body: some View {
-        List {
-            if let group {
-                Section("Join Code") {
-                    Text(group.joinCode)
-                        .font(.title2.monospaced())
-                        .fontWeight(.semibold)
-                }
+        ZStack(alignment: .bottomTrailing) {
+            List {
+                if let group {
+                    Section("Join Code") {
+                        Text(group.joinCode)
+                            .font(.title2.monospaced())
+                            .fontWeight(.semibold)
+                    }
 
-                Section("Your Actor") {
-                    LabeledContent("Actor ID", value: group.localActorID.rawValue)
-                        .font(.caption)
-                }
+                    Section("Your Actor") {
+                        LabeledContent("Actor ID", value: group.localActorID.rawValue)
+                            .font(.caption)
+                    }
 
-                Section("Members") {
-                    ForEach(group.actorIDs, id: \.self) { actorID in
-                        if let actor = store.actor(for: actorID) {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(actor.displayName)
+                    Section("Expenses") {
+                        if groupExpenses.isEmpty {
+                            Text("No expenses yet")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(groupExpenses) { expense in
+                                ExpenseRow(expense: expense, payer: store.actor(for: expense.payload.payerActorID))
+                            }
+                        }
+                    }
+
+                    Section("Members") {
+                        ForEach(group.actorIDs, id: \.self) { actorID in
+                            if let actor = store.actor(for: actorID) {
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(actor.displayName)
+                                        if actor.isLocal {
+                                            Text("Local actor for this device")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+
+                                    Spacer()
+
                                     if actor.isLocal {
-                                        Text("Local actor for this device")
-                                            .font(.caption)
+                                        Image(systemName: "iphone")
                                             .foregroundStyle(.secondary)
                                     }
-                                }
-
-                                Spacer()
-
-                                if actor.isLocal {
-                                    Image(systemName: "iphone")
-                                        .foregroundStyle(.secondary)
                                 }
                             }
                         }
                     }
+                } else {
+                    Text("Group not found")
+                        .foregroundStyle(.secondary)
                 }
-            } else {
-                Text("Group not found")
-                    .foregroundStyle(.secondary)
+            }
+
+            if group != nil {
+                Button {
+                    isShowingAddExpense = true
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.title2.weight(.semibold))
+                        .frame(width: 56, height: 56)
+                }
+                .buttonStyle(.glass)
+                .buttonBorderShape(.circle)
+                .padding(.trailing, 20)
+                .padding(.bottom, 20)
+                .accessibilityLabel("Add expense")
             }
         }
         .navigationTitle(group?.name ?? "Group")
+        .sheet(isPresented: $isShowingAddExpense) {
+            if let group {
+                AddExpenseSheet(group: group, actors: groupActors) { input in
+                    await store.createExpense(
+                        in: group.id,
+                        name: input.name,
+                        description: "",
+                        currencyCode: input.currencyCode,
+                        totalMinorUnits: input.totalMinorUnits,
+                        payerActorID: input.payerActorID,
+                        splitMethod: .equal,
+                        occurredAt: Date()
+                    )
+                }
+                .presentationDetents([.large])
+            }
+        }
+    }
+}
+
+private struct AddExpenseInput {
+    let name: String
+    let currencyCode: String
+    let totalMinorUnits: Int64
+    let payerActorID: ActorID
+}
+
+private struct AddExpenseSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var amount = ""
+    @State private var currencyCode = "USD"
+    @State private var payerActorRawValue: String
+    @State private var isSubmitting = false
+
+    let group: ExpenseGroup
+    let actors: [Actor]
+    let createExpense: (AddExpenseInput) async -> Void
+
+    private var selectedPayerID: ActorID? {
+        ActorID(rawValue: payerActorRawValue)
+    }
+
+    private var totalMinorUnits: Int64? {
+        MoneyText.minorUnits(from: amount)
+    }
+
+    private var canSubmit: Bool {
+        !isSubmitting
+            && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && totalMinorUnits != nil
+            && selectedPayerID != nil
+    }
+
+    init(
+        group: ExpenseGroup,
+        actors: [Actor],
+        createExpense: @escaping (AddExpenseInput) async -> Void
+    ) {
+        self.group = group
+        self.actors = actors
+        self.createExpense = createExpense
+        self._payerActorRawValue = State(initialValue: group.localActorID.rawValue)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Expense") {
+                    TextField("Name", text: $name)
+                        .textInputAutocapitalization(.words)
+                        .onSubmit(submit)
+
+                    TextField("Amount", text: $amount)
+                        .keyboardType(.decimalPad)
+                }
+
+                Section("Details") {
+                    TextField("Currency", text: $currencyCode)
+                        .textInputAutocapitalization(.characters)
+                        .autocorrectionDisabled()
+
+                    Picker("Paid by", selection: $payerActorRawValue) {
+                        ForEach(actors) { actor in
+                            Text(actor.displayName).tag(actor.id.rawValue)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Add Expense")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                    .disabled(isSubmitting)
+                }
+
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(isSubmitting ? "Saving" : "Save", action: submit)
+                        .disabled(!canSubmit)
+                }
+            }
+        }
+    }
+
+    private func submit() {
+        guard canSubmit, let totalMinorUnits, let selectedPayerID else { return }
+        isSubmitting = true
+
+        let input = AddExpenseInput(
+            name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+            currencyCode: currencyCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased(),
+            totalMinorUnits: totalMinorUnits,
+            payerActorID: selectedPayerID
+        )
+
+        Task {
+            await createExpense(input)
+            isSubmitting = false
+            dismiss()
+        }
+    }
+}
+
+private struct ExpenseRow: View {
+    let expense: ExpenseRecord
+    let payer: Actor?
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(expense.payload.name)
+                Text("Paid by \(payer?.displayName ?? "Unknown")")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Text(MoneyText.display(expense.payload.totalMinorUnits, currencyCode: expense.payload.currencyCode))
+                .font(.body.monospacedDigit())
+        }
+    }
+}
+
+private enum MoneyText {
+    static func minorUnits(from text: String) -> Int64? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let withoutCurrencySymbol = trimmed.hasPrefix("$") ? String(trimmed.dropFirst()) : trimmed
+        let parts = withoutCurrencySymbol.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count <= 2, let major = parseDigits(parts.first.map(String.init) ?? "") else { return nil }
+
+        let minorText = parts.count == 2 ? String(parts[1]) : ""
+        guard minorText.count <= 2, let minor = parseDigits(minorText.padding(toLength: 2, withPad: "0", startingAt: 0)) else { return nil }
+
+        return major * 100 + minor
+    }
+
+    static func display(_ minorUnits: Int64, currencyCode: String) -> String {
+        let major = minorUnits / 100
+        let minor = abs(minorUnits % 100)
+        return "\(currencyCode) \(major).\(String(format: "%02lld", minor))"
+    }
+
+    private static func parseDigits(_ text: String) -> Int64? {
+        guard !text.isEmpty else { return 0 }
+        var result = Int64(0)
+
+        for character in text {
+            guard let digit = character.wholeNumberValue else { return nil }
+            result = result * 10 + Int64(digit)
+        }
+
+        return result
     }
 }
 

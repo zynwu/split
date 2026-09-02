@@ -480,9 +480,6 @@ final class SplitStore {
             do {
                 let serverGroups = try await apiClient.fetchGroups()
                 applyServerGroups(serverGroups)
-                for group in groups {
-                    await syncGroup(id: group.id)
-                }
             } catch {
                 // Keep showing local groups when a background refresh fails.
             }

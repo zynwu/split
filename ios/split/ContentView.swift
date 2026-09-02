@@ -342,6 +342,9 @@ private struct GroupDetailView: View {
             }
         }
         .navigationTitle(group?.name ?? "Group")
+        .task(id: groupID) {
+            await store.syncGroup(id: groupID)
+        }
         .sheet(isPresented: $isShowingAddExpense) {
             if let group {
                 AddExpenseSheet(group: group, actors: groupActors) { input in

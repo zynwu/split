@@ -68,6 +68,7 @@ type LedgerEventInput struct {
 	EntityUUID     string
 	EventType      string
 	ActorUUID      string
+	EventCreatedAt time.Time
 	ClientSequence int64
 	BaseSequence   int64
 	PayloadVersion int
@@ -82,6 +83,7 @@ type LedgerEvent struct {
 	EntityUUID     string          `json:"entity_uuid"`
 	EventType      string          `json:"event_type"`
 	ActorUUID      string          `json:"actor_uuid"`
+	EventCreatedAt time.Time       `json:"event_created_at"`
 	DeviceID       string          `json:"device_id"`
 	ClientSequence int64           `json:"client_sequence"`
 	BaseSequence   int64           `json:"base_sequence"`
@@ -190,8 +192,13 @@ func (database *Database) AppendLedgerEvent(ctx context.Context, deviceID string
 	}
 	currentExpenseExists := err == nil
 	currentExpenseSequence := int64(0)
+	currentExpenseEvent := ledgerEventVersion{}
 	if currentExpenseExists {
 		currentExpenseSequence = currentExpense.LatestEventSequence
+		currentExpenseEvent, err = findLedgerEventVersionBySequenceTx(ctx, tx, normalized.GroupUUID, currentExpenseSequence)
+		if err != nil {
+			return AppendLedgerEventResult{}, fmt.Errorf("load current expense event: %w", err)
+		}
 	}
 
 	if payload != nil {
@@ -199,11 +206,17 @@ func (database *Database) AppendLedgerEvent(ctx context.Context, deviceID string
 			return AppendLedgerEventResult{}, err
 		}
 	}
-	if normalized.EventType == "expense.voided" && !currentExpenseExists {
+	if (normalized.EventType == "expense.voided" || normalized.EventType == "expense.deleted") && !currentExpenseExists {
 		return AppendLedgerEventResult{}, ErrExpenseNotFound
 	}
 
-	hadConflict := normalized.BaseSequence != currentExpenseSequence
+	winningEvent := !currentExpenseExists || eventVersionWins(
+		normalized.EventCreatedAt,
+		normalized.EventUUID,
+		currentExpenseEvent.EventCreatedAt,
+		currentExpenseEvent.EventUUID,
+	)
+	hadConflict := normalized.BaseSequence != currentExpenseSequence || (currentExpenseExists && !winningEvent)
 	nextSequence := currentGroupSequence + 1
 	recordedAt := time.Now().UTC()
 
@@ -212,12 +225,12 @@ func (database *Database) AppendLedgerEvent(ctx context.Context, deviceID string
 		INSERT INTO ledger_events (
 			event_uuid, group_uuid, sequence, entity_type, entity_uuid,
 				event_type, actor_uuid, device_id, client_sequence, base_sequence,
-				had_conflict, payload_version, payload_hash, payload, recorded_at
+				event_created_at, had_conflict, payload_version, payload_hash, payload, recorded_at
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 			RETURNING event_uuid, group_uuid, sequence, entity_type, entity_uuid,
 				event_type, actor_uuid, device_id, client_sequence, base_sequence,
-				had_conflict, payload_version, payload_hash, payload, recorded_at`,
+				event_created_at, had_conflict, payload_version, payload_hash, payload, recorded_at`,
 		normalized.EventUUID,
 		normalized.GroupUUID,
 		nextSequence,
@@ -228,6 +241,7 @@ func (database *Database) AppendLedgerEvent(ctx context.Context, deviceID string
 		deviceID,
 		normalized.ClientSequence,
 		normalized.BaseSequence,
+		normalized.EventCreatedAt,
 		hadConflict,
 		normalized.PayloadVersion,
 		eventHash[:],
@@ -244,6 +258,7 @@ func (database *Database) AppendLedgerEvent(ctx context.Context, deviceID string
 		&event.DeviceID,
 		&event.ClientSequence,
 		&event.BaseSequence,
+		&event.EventCreatedAt,
 		&event.HadConflict,
 		&event.PayloadVersion,
 		&event.PayloadHash,
@@ -265,12 +280,16 @@ func (database *Database) AppendLedgerEvent(ctx context.Context, deviceID string
 	var expense *Expense
 	switch normalized.EventType {
 	case "expense.upsert", "expense.created", "expense.updated":
-		if err := applyExpenseUpsertTx(ctx, tx, event, *payload, recordedAt); err != nil {
-			return AppendLedgerEventResult{}, err
+		if winningEvent {
+			if err := applyExpenseUpsertTx(ctx, tx, event, *payload); err != nil {
+				return AppendLedgerEventResult{}, err
+			}
 		}
 	case "expense.voided", "expense.deleted":
-		if err := applyExpenseVoidedTx(ctx, tx, event, recordedAt); err != nil {
-			return AppendLedgerEventResult{}, err
+		if winningEvent {
+			if err := applyExpenseVoidedTx(ctx, tx, event); err != nil {
+				return AppendLedgerEventResult{}, err
+			}
 		}
 	default:
 		return AppendLedgerEventResult{}, fmt.Errorf("%w: %s", ErrUnsupportedEvent, normalized.EventType)
@@ -289,7 +308,7 @@ func (database *Database) AppendLedgerEvent(ctx context.Context, deviceID string
 	return AppendLedgerEventResult{
 		Event:    event,
 		Expense:  expense,
-		Applied:  true,
+		Applied:  winningEvent,
 		Conflict: hadConflict,
 	}, nil
 }
@@ -425,7 +444,7 @@ func (database *Database) ListLedgerEventsForDevice(ctx context.Context, groupUU
 	rows, err := tx.QueryContext(ctx, `
 		SELECT event_uuid, group_uuid, sequence, entity_type, entity_uuid,
 			event_type, actor_uuid, device_id, client_sequence, base_sequence,
-			had_conflict, payload_version, payload_hash, payload, recorded_at
+			event_created_at, had_conflict, payload_version, payload_hash, payload, recorded_at
 		FROM ledger_events
 		WHERE group_uuid = $1
 			AND sequence > $2
@@ -488,6 +507,10 @@ func normalizeLedgerEvent(input LedgerEventInput) (LedgerEventInput, *ExpenseEve
 	if err != nil {
 		return LedgerEventInput{}, nil, fmt.Errorf("%w: %v", ErrInvalidExpensePayload, err)
 	}
+	if input.EventCreatedAt.IsZero() {
+		return LedgerEventInput{}, nil, fmt.Errorf("%w: event_created_at is required", ErrInvalidExpensePayload)
+	}
+	input.EventCreatedAt = input.EventCreatedAt.UTC().Truncate(time.Microsecond)
 	input.EntityType = strings.ToLower(strings.TrimSpace(input.EntityType))
 	if input.EntityType != "expense" {
 		return LedgerEventInput{}, nil, fmt.Errorf("%w: entity_type %q", ErrUnsupportedEvent, input.EntityType)
@@ -661,7 +684,7 @@ func validateExpenseActorsTx(ctx context.Context, tx *sql.Tx, groupUUID string, 
 	return nil
 }
 
-func applyExpenseUpsertTx(ctx context.Context, tx *sql.Tx, event LedgerEvent, payload ExpenseEventPayload, recordedAt time.Time) error {
+func applyExpenseUpsertTx(ctx context.Context, tx *sql.Tx, event LedgerEvent, payload ExpenseEventPayload) error {
 	_, err := loadExpenseTx(ctx, tx, event.GroupUUID, event.EntityUUID)
 	if err != nil && !errors.Is(err, ErrExpenseNotFound) {
 		return err
@@ -687,7 +710,7 @@ func applyExpenseUpsertTx(ctx context.Context, tx *sql.Tx, event LedgerEvent, pa
 			payload.SplitMethod,
 			payload.SplitConfig,
 			payload.OccurredAt,
-			recordedAt,
+			event.EventCreatedAt,
 			event.Sequence,
 		)
 		if err != nil {
@@ -718,7 +741,7 @@ func applyExpenseUpsertTx(ctx context.Context, tx *sql.Tx, event LedgerEvent, pa
 			payload.SplitMethod,
 			payload.SplitConfig,
 			payload.OccurredAt,
-			recordedAt,
+			event.EventCreatedAt,
 			event.Sequence,
 		)
 		if err != nil {
@@ -742,13 +765,13 @@ func applyExpenseUpsertTx(ctx context.Context, tx *sql.Tx, event LedgerEvent, pa
 	return nil
 }
 
-func applyExpenseVoidedTx(ctx context.Context, tx *sql.Tx, event LedgerEvent, recordedAt time.Time) error {
+func applyExpenseVoidedTx(ctx context.Context, tx *sql.Tx, event LedgerEvent) error {
 	result, err := tx.ExecContext(ctx, `
 		UPDATE expenses
 		SET updated_at = $3,
 			latest_event_sequence = $4,
 			voided_at = $3
-		WHERE expense_uuid = $1 AND group_uuid = $2`, event.EntityUUID, event.GroupUUID, recordedAt, event.Sequence)
+		WHERE expense_uuid = $1 AND group_uuid = $2`, event.EntityUUID, event.GroupUUID, event.EventCreatedAt, event.Sequence)
 	if err != nil {
 		return fmt.Errorf("void expense projection: %w", err)
 	}
@@ -862,7 +885,7 @@ func findLedgerEventByUUIDTx(ctx context.Context, tx *sql.Tx, eventUUID string) 
 	err := scanLedgerEvent(tx.QueryRowContext(ctx, `
 		SELECT event_uuid, group_uuid, sequence, entity_type, entity_uuid,
 			event_type, actor_uuid, device_id, client_sequence, base_sequence,
-			had_conflict, payload_version, payload_hash, payload, recorded_at
+			event_created_at, had_conflict, payload_version, payload_hash, payload, recorded_at
 		FROM ledger_events
 		WHERE event_uuid = $1`, eventUUID), &event)
 	return event, err
@@ -872,11 +895,28 @@ func findLedgerEventByClientSequenceTx(ctx context.Context, tx *sql.Tx, deviceID
 	var event LedgerEvent
 	err := scanLedgerEvent(tx.QueryRowContext(ctx, `
 		SELECT event_uuid, group_uuid, sequence, entity_type, entity_uuid,
-		event_type, actor_uuid, device_id, client_sequence, base_sequence,
-			had_conflict, payload_version, payload_hash, payload, recorded_at
+			event_type, actor_uuid, device_id, client_sequence, base_sequence,
+			event_created_at, had_conflict, payload_version, payload_hash, payload, recorded_at
 		FROM ledger_events
 		WHERE device_id = $1 AND client_sequence = $2`, deviceID, clientSequence), &event)
 	return event, err
+}
+
+type ledgerEventVersion struct {
+	EventUUID      string
+	EventCreatedAt time.Time
+}
+
+func findLedgerEventVersionBySequenceTx(ctx context.Context, tx *sql.Tx, groupUUID string, sequence int64) (ledgerEventVersion, error) {
+	var version ledgerEventVersion
+	err := tx.QueryRowContext(ctx, `
+		SELECT event_uuid, event_created_at
+		FROM ledger_events
+		WHERE group_uuid = $1 AND sequence = $2`, groupUUID, sequence).Scan(
+		&version.EventUUID,
+		&version.EventCreatedAt,
+	)
+	return version, err
 }
 
 type rowScanner interface {
@@ -896,6 +936,7 @@ func scanLedgerEvent(scanner rowScanner, event *LedgerEvent) error {
 		&event.DeviceID,
 		&event.ClientSequence,
 		&event.BaseSequence,
+		&event.EventCreatedAt,
 		&event.HadConflict,
 		&event.PayloadVersion,
 		&event.PayloadHash,
@@ -917,10 +958,21 @@ func ledgerEventsEqual(existing LedgerEvent, input LedgerEventInput, deviceID st
 		existing.EventType == input.EventType &&
 		existing.ActorUUID == input.ActorUUID &&
 		existing.DeviceID == deviceID &&
+		existing.EventCreatedAt.Equal(input.EventCreatedAt) &&
 		existing.ClientSequence == input.ClientSequence &&
 		existing.BaseSequence == input.BaseSequence &&
 		existing.PayloadVersion == input.PayloadVersion &&
 		bytes.Equal(existing.PayloadHash, payloadHash)
+}
+
+func eventVersionWins(incomingTime time.Time, incomingUUID string, currentTime time.Time, currentUUID string) bool {
+	if incomingTime.After(currentTime) {
+		return true
+	}
+	if incomingTime.Before(currentTime) {
+		return false
+	}
+	return incomingUUID > currentUUID
 }
 
 func expenseOrNil(expense Expense, err error) *Expense {

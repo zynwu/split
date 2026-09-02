@@ -93,6 +93,7 @@ curl -X POST "http://localhost:8080/api/groups/<group-uuid>/events" \
     "entity_uuid":"<new-expense-uuid>",
     "event_type":"expense.created",
     "actor_uuid":"<authenticated-member-actor-uuid>",
+    "event_created_at":"2026-09-01T19:31:00Z",
     "client_sequence":0,
     "base_sequence":0,
     "payload_version":1,
@@ -119,6 +120,11 @@ the server. Manual splits must include `amount_minor_units` for every split
 and sum exactly to `total_minor_units`. The `currency_code` is an uppercase
 three-letter code such as `USD` or `EUR`.
 
+`event_created_at` is the client-side time at which the event was created;
+`recorded_at` in the returned ledger event is when the server received it.
+The expense projection's `created_at` and `updated_at` reflect the winning
+event's creation time.
+
 Use the expense projection for the current group state:
 
 ```sh
@@ -135,16 +141,21 @@ curl "http://localhost:8080/api/groups/<group-uuid>/events?after=0&limit=100" \
 ```
 
 The server assigns a monotonically increasing `sequence` per group. Each
-accepted event is retained, and the projection applies the last event received
-by the server for an expense. If `base_sequence` is older than the expense's
-current `version`, the event is still retained and applied but the response has
-`"conflict":true`; this is the initial last-arrival-wins policy.
+accepted event is retained. The sequence is the server's receipt order and is
+used only for synchronization. The projection applies the event with the
+latest `event_created_at` for that expense; equal timestamps use `event_uuid` as
+a deterministic tie-breaker. If `base_sequence` is older than the expense's
+current `version`, or if the event loses that timestamp comparison, the
+response has `"conflict":true`. A losing event remains in the ledger with
+`"applied":false` and does not overwrite the current projection.
 
-For an edit, keep the same `entity_uuid`, use a new `event_uuid` and the next
-device `client_sequence`, and set `base_sequence` to the expense's current
-`version`. To void an expense, use `event_type:"expense.voided"` with an empty
-object payload. Voiding keeps the expense and its history available; the
-projection returns its `voided_at` timestamp.
+For an edit, create and persist `event_created_at` on the client, keep the same
+`entity_uuid`, use a new `event_uuid` and the next device `client_sequence`, and
+set `base_sequence` to the expense's current `version`. Reuse all of those
+values unchanged when retrying the event. To void an expense, use
+`event_type:"expense.voided"` with an empty object payload. Voiding keeps the
+expense and its history available; the projection returns its `voided_at`
+timestamp.
 
 Health check: `GET http://localhost:8080/api/healthz`
 

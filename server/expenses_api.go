@@ -8,9 +8,11 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
+
+	"server/database"
 
 	"github.com/google/uuid"
-	"server/database"
 )
 
 type ledgerEventRequest struct {
@@ -19,6 +21,7 @@ type ledgerEventRequest struct {
 	EntityUUID     string          `json:"entity_uuid"`
 	EventType      string          `json:"event_type"`
 	ActorUUID      string          `json:"actor_uuid"`
+	EventCreatedAt time.Time       `json:"event_created_at"`
 	ClientSequence int64           `json:"client_sequence"`
 	BaseSequence   int64           `json:"base_sequence"`
 	PayloadVersion int             `json:"payload_version"`
@@ -65,6 +68,7 @@ func appendLedgerEventHandler(db *database.Database) http.HandlerFunc {
 			EntityUUID:     payload.EntityUUID,
 			EventType:      payload.EventType,
 			ActorUUID:      payload.ActorUUID,
+			EventCreatedAt: payload.EventCreatedAt,
 			ClientSequence: payload.ClientSequence,
 			BaseSequence:   payload.BaseSequence,
 			PayloadVersion: payload.PayloadVersion,

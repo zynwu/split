@@ -517,16 +517,31 @@ struct PulledExpenseEvent: Decodable, Identifiable, Hashable {
     var id: EventID { eventID }
     let eventID: EventID
     let sequence: Int64
+    let entityID: ExpenseID?
+    let eventType: ExpenseEventType?
+    let actorID: ActorID?
+    let eventCreatedAt: Date?
+    let payload: ExpensePayload?
 
     private enum CodingKeys: String, CodingKey {
         case event_uuid
         case sequence
+        case entity_uuid
+        case event_type
+        case actor_uuid
+        case event_created_at
+        case payload
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.eventID = EventID(rawValue: try container.decode(String.self, forKey: .event_uuid))
         self.sequence = try container.decode(Int64.self, forKey: .sequence)
+        self.entityID = try container.decodeIfPresent(String.self, forKey: .entity_uuid).map(ExpenseID.init(rawValue:))
+        self.eventType = try container.decodeIfPresent(ExpenseEventType.self, forKey: .event_type)
+        self.actorID = try container.decodeIfPresent(String.self, forKey: .actor_uuid).map(ActorID.init(rawValue:))
+        self.eventCreatedAt = try container.decodeIfPresent(Date.self, forKey: .event_created_at)
+        self.payload = try container.decodeIfPresent(ExpensePayload.self, forKey: .payload)
     }
 }
 

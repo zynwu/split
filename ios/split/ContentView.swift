@@ -257,6 +257,7 @@ private struct GroupDetailView: View {
     @Bindable var store: SplitStore
     let groupID: GroupID
     @State private var isShowingAddExpense = false
+    @State private var selectedTab: GroupDetailTab = .balances
 
     private var group: ExpenseGroup? {
         store.groups.first { $0.id == groupID }
@@ -271,74 +272,42 @@ private struct GroupDetailView: View {
         store.expenses(for: groupID)
     }
 
+    private var groupAuditEvents: [ExpenseAuditEntry] {
+        store.auditEvents(for: groupID)
+    }
+
     var body: some View {
-        ZStack(alignment: .bottomTrailing) {
-            List {
-                if let group {
-                    Section("Join Code") {
-                        Text(group.joinCode)
-                            .font(.title2.monospaced())
-                            .fontWeight(.semibold)
-                    }
-
-                    Section("Your Actor") {
-                        LabeledContent("Actor ID", value: group.localActorID.rawValue)
-                            .font(.caption)
-                    }
-
-                    Section("Expenses") {
-                        if groupExpenses.isEmpty {
-                            Text("No expenses yet")
-                                .foregroundStyle(.secondary)
-                        } else {
-                            ForEach(groupExpenses) { expense in
-                                ExpenseRow(expense: expense, payer: store.actor(for: expense.payload.payerActorID))
-                            }
-                        }
-                    }
-
-                    Section("Members") {
-                        ForEach(group.actorIDs, id: \.self) { actorID in
-                            if let actor = store.actor(for: actorID) {
-                                HStack {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(actor.displayName)
-                                        if actor.isLocal {
-                                            Text("Local actor for this device")
-                                                .font(.caption)
-                                                .foregroundStyle(.secondary)
-                                        }
-                                    }
-
-                                    Spacer()
-
-                                    if actor.isLocal {
-                                        Image(systemName: "iphone")
-                                            .foregroundStyle(.secondary)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    Text("Group not found")
-                        .foregroundStyle(.secondary)
+        ZStack(alignment: .bottom) {
+            Group {
+                switch selectedTab {
+                case .balances:
+                    balancesList
+                case .activity:
+                    activityList
                 }
             }
+            .safeAreaPadding(.bottom, 96)
 
             if group != nil {
-                Button {
-                    isShowingAddExpense = true
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.title2.weight(.semibold))
-                        .frame(width: 56, height: 56)
+                VStack(spacing: 14) {
+                    HStack {
+                        Spacer()
+                        Button {
+                            isShowingAddExpense = true
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(.title2.weight(.semibold))
+                                .frame(width: 56, height: 56)
+                        }
+                        .buttonStyle(.glass)
+                        .buttonBorderShape(.circle)
+                        .accessibilityLabel("Add expense")
+                    }
+
+                    GroupDetailTabSlider(selectedTab: $selectedTab)
                 }
-                .buttonStyle(.glass)
-                .buttonBorderShape(.circle)
-                .padding(.trailing, 20)
-                .padding(.bottom, 20)
-                .accessibilityLabel("Add expense")
+                .padding(.horizontal, 20)
+                .padding(.bottom, 16)
             }
         }
         .navigationTitle(group?.name ?? "Group")
@@ -360,6 +329,224 @@ private struct GroupDetailView: View {
                     )
                 }
                 .presentationDetents([.large])
+            }
+        }
+    }
+
+    private var balancesList: some View {
+        List {
+            if let group {
+                Section("Join Code") {
+                    Text(group.joinCode)
+                        .font(.title2.monospaced())
+                        .fontWeight(.semibold)
+                }
+
+                Section("Balances") {
+                    if let balances = store.balances(for: groupID), !balances.currencyBalances.isEmpty {
+                        ForEach(balances.currencyBalances) { currencyBalance in
+                            ForEach(currencyBalance.memberBalances) { memberBalance in
+                                BalanceRow(
+                                    memberBalance: memberBalance,
+                                    currencyCode: currencyBalance.currencyCode,
+                                    actor: store.actor(for: memberBalance.actorID)
+                                )
+                            }
+                        }
+                    } else {
+                        Text("No balances yet")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Section("Members") {
+                    ForEach(group.actorIDs, id: \.self) { actorID in
+                        if let actor = store.actor(for: actorID) {
+                            MemberRow(actor: actor)
+                        }
+                    }
+                }
+            } else {
+                Text("Group not found")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var activityList: some View {
+        List {
+            Section("Activity") {
+                if groupAuditEvents.isEmpty {
+                    Text("No activity yet")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(groupAuditEvents) { auditEvent in
+                        AuditEventRow(auditEvent: auditEvent, actor: store.actor(for: auditEvent.actorID))
+                    }
+                }
+            }
+
+            Section("Expenses") {
+                if groupExpenses.isEmpty {
+                    Text("No expenses yet")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(groupExpenses) { expense in
+                        ExpenseRow(expense: expense, payer: store.actor(for: expense.payload.payerActorID))
+                    }
+                }
+            }
+        }
+    }
+}
+
+private enum GroupDetailTab: String, CaseIterable, Identifiable {
+    case balances = "Balances"
+    case activity = "Activity"
+
+    var id: String { rawValue }
+
+    var systemImage: String {
+        switch self {
+        case .balances:
+            "person.2"
+        case .activity:
+            "list.bullet.rectangle"
+        }
+    }
+}
+
+private struct GroupDetailTabSlider: View {
+    @Binding var selectedTab: GroupDetailTab
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(GroupDetailTab.allCases) { tab in
+                Button {
+                    withAnimation(.snappy) {
+                        selectedTab = tab
+                    }
+                } label: {
+                    Label(tab.rawValue, systemImage: tab.systemImage)
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .foregroundStyle(selectedTab == tab ? .primary : .secondary)
+                        .background {
+                            if selectedTab == tab {
+                                Capsule()
+                                    .fill(.white.opacity(0.24))
+                            }
+                        }
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(6)
+        .glassEffect(.regular.interactive(), in: Capsule())
+    }
+}
+
+private struct BalanceRow: View {
+    let memberBalance: BalanceMember
+    let currencyCode: String
+    let actor: Actor?
+
+    private var name: String {
+        actor?.displayName.isEmpty == false ? actor?.displayName ?? memberBalance.displayName : memberBalance.displayName
+    }
+
+    private var status: String {
+        if memberBalance.netMinorUnits > 0 {
+            "Gets back"
+        } else if memberBalance.netMinorUnits < 0 {
+            "Owes"
+        } else {
+            "Settled"
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(name.isEmpty ? memberBalance.actorID.rawValue : name)
+                Text(status)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Text(MoneyText.display(memberBalance.netMinorUnits, currencyCode: currencyCode))
+                .font(.body.monospacedDigit())
+                .foregroundStyle(memberBalance.netMinorUnits < 0 ? .red : .primary)
+        }
+    }
+}
+
+private struct MemberRow: View {
+    let actor: Actor
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(actor.displayName)
+                if actor.isLocal {
+                    Text("Local actor for this device")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer()
+
+            if actor.isLocal {
+                Image(systemName: "iphone")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+private struct AuditEventRow: View {
+    let auditEvent: ExpenseAuditEntry
+    let actor: Actor?
+
+    private var title: String {
+        switch auditEvent.eventType {
+        case .created:
+            "Created \(auditEvent.expenseName)"
+        case .updated:
+            "Updated \(auditEvent.expenseName)"
+        case .voided:
+            "Voided \(auditEvent.expenseName)"
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                Text(actor?.displayName ?? auditEvent.actorID.rawValue)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            VStack(alignment: .trailing, spacing: 4) {
+                Text(MoneyText.display(auditEvent.totalMinorUnits, currencyCode: auditEvent.currencyCode))
+                    .font(.body.monospacedDigit())
+
+                if auditEvent.isPending {
+                    Text("Pending")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if let sequence = auditEvent.sequence {
+                    Text("#\(sequence)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }

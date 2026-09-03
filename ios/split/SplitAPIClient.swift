@@ -534,12 +534,67 @@ enum ExpenseEventType: String, Codable, Hashable {
     case voided = "expense.voided"
 }
 
+struct ExpenseReplacementRequest: Encodable {
+    let event: ExpenseEventRequest
+
+    private enum CodingKeys: String, CodingKey {
+        case event_uuid
+        case actor_uuid
+        case event_created_at
+        case client_sequence
+        case base_sequence
+        case payload_version
+        case payload
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(event.eventID.rawValue, forKey: .event_uuid)
+        try container.encode(event.actorID.rawValue, forKey: .actor_uuid)
+        try container.encode(event.eventCreatedAt, forKey: .event_created_at)
+        try container.encode(event.clientSequence, forKey: .client_sequence)
+        try container.encode(event.baseSequence, forKey: .base_sequence)
+        try container.encode(event.payloadVersion, forKey: .payload_version)
+        try container.encode(event.payload, forKey: .payload)
+    }
+}
+
 struct PostEventResponse: Decodable {
     let sequence: Int64?
     let applied: Bool?
     let replayed: Bool?
     let conflict: Bool?
     let expense: ServerExpense?
+
+    private enum CodingKeys: String, CodingKey {
+        case sequence
+        case event
+        case applied
+        case replayed
+        case conflict
+        case expense
+    }
+
+    private enum EventCodingKeys: String, CodingKey {
+        case sequence
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.applied = try container.decodeIfPresent(Bool.self, forKey: .applied)
+        self.replayed = try container.decodeIfPresent(Bool.self, forKey: .replayed)
+        self.conflict = try container.decodeIfPresent(Bool.self, forKey: .conflict)
+
+        if let sequence = try container.decodeIfPresent(Int64.self, forKey: .sequence) {
+            self.sequence = sequence
+        } else if let eventContainer = try? container.nestedContainer(keyedBy: EventCodingKeys.self, forKey: .event) {
+            self.sequence = try eventContainer.decodeIfPresent(Int64.self, forKey: .sequence)
+        } else {
+            self.sequence = nil
+        }
+
+        self.expense = try? container.decodeIfPresent(ServerExpense.self, forKey: .expense)
+    }
 }
 
 struct PulledExpenseEvent: Decodable, Identifiable, Hashable {
@@ -659,6 +714,13 @@ struct SplitAPIClient {
         var request = try authorizedRequest(path: "/groups/\(groupID.rawValue)/events", method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(event)
+        return try await send(request)
+    }
+
+    func updateExpense(groupID: GroupID, expenseID: ExpenseID, event: ExpenseEventRequest) async throws -> PostEventResponse {
+        var request = try authorizedRequest(path: "/groups/\(groupID.rawValue)/expenses/\(expenseID.rawValue)", method: "PUT")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(ExpenseReplacementRequest(event: event))
         return try await send(request)
     }
 

@@ -555,6 +555,48 @@ final class SplitStore {
         }
     }
 
+    func updateExpense(
+        id expenseID: ExpenseID,
+        name: String,
+        description: String = "",
+        currencyCode: String = "USD",
+        totalMinorUnits: Int64,
+        payerActorID: ActorID,
+        splitMethod: SplitMethod,
+        manualSplits: [ExpenseSplit]?
+    ) async {
+        do {
+            guard let expense = expense(id: expenseID) else { throw SplitStoreError.groupNotFound }
+            let event = try makeExpenseEvent(
+                groupID: expense.groupID,
+                expenseID: expense.id,
+                eventType: .updated,
+                baseSequence: expense.version,
+                name: name,
+                description: description,
+                currencyCode: currencyCode,
+                totalMinorUnits: totalMinorUnits,
+                payerActorID: payerActorID,
+                splitMethod: splitMethod,
+                manualSplits: manualSplits,
+                occurredAt: expense.payload.occurredAt
+            )
+
+            let response = try await apiClient.updateExpense(groupID: expense.groupID, expenseID: expense.id, event: event)
+            upsertAuditEntry(ExpenseAuditEntry(groupID: expense.groupID, event: event, sequence: response.sequence, isPending: false))
+            if let serverExpense = response.expense {
+                upsertExpense(ExpenseRecord(serverExpense: serverExpense))
+            } else {
+                applyLocalExpense(event: event, groupID: expense.groupID)
+            }
+            try await refreshExpenses(for: expense.groupID)
+            try await refreshBalances(for: expense.groupID)
+            persist()
+        } catch {
+            registrationStatus = .failed(error.localizedDescription)
+        }
+    }
+
     func syncGroup(id groupID: GroupID) async {
         guard !syncingGroupIDs.contains(groupID) else { return }
         syncingGroupIDs.insert(groupID)

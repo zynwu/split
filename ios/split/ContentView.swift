@@ -567,6 +567,7 @@ private struct AddExpenseSheet: View {
 
     let group: ExpenseGroup
     let actors: [Actor]
+    let title: String
     let createExpense: (AddExpenseInput) async -> Void
 
     private var selectedPayerID: ActorID? {
@@ -615,13 +616,30 @@ private struct AddExpenseSheet: View {
     init(
         group: ExpenseGroup,
         actors: [Actor],
+        expense: ExpenseRecord? = nil,
+        title: String = "Add Expense",
         createExpense: @escaping (AddExpenseInput) async -> Void
     ) {
         self.group = group
         self.actors = actors
+        self.title = title
         self.createExpense = createExpense
-        self._payerActorRawValue = State(initialValue: group.localActorID.rawValue)
-        self._includedActorIDs = State(initialValue: Set(actors.map(\.id)))
+        self._name = State(initialValue: expense?.payload.name ?? "")
+        self._amount = State(initialValue: expense.map { MoneyText.inputText($0.payload.totalMinorUnits) } ?? "")
+        self._currencyCode = State(initialValue: expense?.payload.currencyCode ?? "USD")
+        self._payerActorRawValue = State(initialValue: expense?.payload.payerActorID.rawValue ?? group.localActorID.rawValue)
+        self._splitMethod = State(initialValue: expense?.payload.splitMethod ?? .equal)
+
+        let includedActorIDs = expense?.payload.splitMethod == .manual
+            ? Set(expense?.payload.splits.filter { ($0.amountMinorUnits ?? 0) != 0 }.map(\.actorID) ?? [])
+            : Set(actors.map(\.id))
+        self._includedActorIDs = State(initialValue: includedActorIDs)
+
+        let manualSplitAmounts = Dictionary(uniqueKeysWithValues: expense?.payload.splits.compactMap { split -> (ActorID, String)? in
+            guard let amount = split.amountMinorUnits, amount != 0 else { return nil }
+            return (split.actorID, MoneyText.inputText(amount))
+        } ?? [])
+        self._manualSplitAmounts = State(initialValue: manualSplitAmounts)
     }
 
     var body: some View {
@@ -674,7 +692,7 @@ private struct AddExpenseSheet: View {
                     }
                 }
             }
-            .navigationTitle("Add Expense")
+            .navigationTitle(title)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
@@ -756,9 +774,20 @@ private struct ManualSplitRow: View {
 private struct ExpenseDetailView: View {
     @Bindable var store: SplitStore
     let expenseID: ExpenseID
+    @State private var isShowingEditExpense = false
 
     private var expense: ExpenseRecord? {
         store.expense(id: expenseID)
+    }
+
+    private var group: ExpenseGroup? {
+        guard let expense else { return nil }
+        return store.groups.first { $0.id == expense.groupID }
+    }
+
+    private var groupActors: [Actor] {
+        guard let group else { return [] }
+        return group.actorIDs.compactMap { store.actor(for: $0) }
     }
 
     private var includedSplits: [ExpenseSplit] {
@@ -796,6 +825,32 @@ private struct ExpenseDetailView: View {
             }
         }
         .navigationTitle(expense?.payload.name ?? "Expense")
+        .toolbar {
+            if expense != nil && group != nil {
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Edit") {
+                        isShowingEditExpense = true
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $isShowingEditExpense) {
+            if let expense, let group {
+                AddExpenseSheet(group: group, actors: groupActors, expense: expense, title: "Edit Expense") { input in
+                    await store.updateExpense(
+                        id: expense.id,
+                        name: input.name,
+                        description: "",
+                        currencyCode: input.currencyCode,
+                        totalMinorUnits: input.totalMinorUnits,
+                        payerActorID: input.payerActorID,
+                        splitMethod: input.splitMethod,
+                        manualSplits: input.manualSplits
+                    )
+                }
+                .presentationDetents([.large])
+            }
+        }
     }
 }
 
@@ -837,6 +892,12 @@ private enum MoneyText {
         let major = minorUnits / 100
         let minor = abs(minorUnits % 100)
         return "\(currencyCode) \(major).\(String(format: "%02lld", minor))"
+    }
+
+    static func inputText(_ minorUnits: Int64) -> String {
+        let major = minorUnits / 100
+        let minor = abs(minorUnits % 100)
+        return "\(major).\(String(format: "%02lld", minor))"
     }
 
     private static func parseDigits(_ text: String) -> Int64? {

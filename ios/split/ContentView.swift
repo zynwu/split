@@ -381,16 +381,6 @@ private struct GroupDetailView: View {
                 }
             }
 
-            Section("Expenses") {
-                if groupExpenses.isEmpty {
-                    Text("No expenses yet")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(groupExpenses) { expense in
-                        ExpenseRow(expense: expense, payer: store.actor(for: expense.payload.payerActorID))
-                    }
-                }
-            }
         }
     }
 }

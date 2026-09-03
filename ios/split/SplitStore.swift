@@ -208,6 +208,20 @@ struct ExpenseAuditEntry: Codable, Hashable, Identifiable {
         self.eventCreatedAt = eventCreatedAt
         self.isPending = false
     }
+
+    init(groupID: GroupID, expense: ExpenseRecord) {
+        self.id = EventID(rawValue: "expense-\(expense.id.rawValue)-created")
+        self.groupID = groupID
+        self.sequence = expense.version > 0 ? expense.version : nil
+        self.eventType = .created
+        self.actorID = expense.createdByActorID
+        self.expenseID = expense.id
+        self.expenseName = expense.payload.name
+        self.totalMinorUnits = expense.payload.totalMinorUnits
+        self.currencyCode = expense.payload.currencyCode
+        self.eventCreatedAt = expense.createdAt
+        self.isPending = false
+    }
 }
 
 struct SplitSnapshot: Codable {
@@ -380,6 +394,7 @@ final class SplitStore {
             self.auditEvents = snapshot.auditEvents
             self.groupBalances = snapshot.groupBalances
             self.nextClientSequence = snapshot.nextClientSequence
+            self.auditEvents = deduplicatedAuditEvents(auditEvents)
             ensureLocalActorsExist()
         } else {
             self.deviceID = savedDeviceID
@@ -482,9 +497,19 @@ final class SplitStore {
     }
 
     func auditEvents(for groupID: GroupID) -> [ExpenseAuditEntry] {
-        auditEvents
-            .filter { $0.groupID == groupID }
-            .sorted { $0.eventCreatedAt > $1.eventCreatedAt }
+        let storedEntries = deduplicatedAuditEvents(auditEvents.filter { $0.groupID == groupID })
+        let expenseIDsWithCreatedEvents = Set(storedEntries.filter { $0.eventType == .created }.map(\.expenseID))
+        let fallbackEntries = expenses
+            .filter { $0.groupID == groupID && !expenseIDsWithCreatedEvents.contains($0.id) }
+            .map { ExpenseAuditEntry(groupID: groupID, expense: $0) }
+
+        return deduplicatedAuditEvents(storedEntries + fallbackEntries)
+            .sorted { lhs, rhs in
+                if lhs.eventCreatedAt == rhs.eventCreatedAt {
+                    return lhs.id.rawValue > rhs.id.rawValue
+                }
+                return lhs.eventCreatedAt > rhs.eventCreatedAt
+            }
     }
 
     func deviceActorLink(for groupID: GroupID) -> DeviceActorLink? {
@@ -534,6 +559,7 @@ final class SplitStore {
         do {
             try await postPendingEvents(for: groupID)
             try await pullRemoteEvents(for: groupID)
+            try await refreshAuditEvents(for: groupID)
             try await refreshExpenses(for: groupID)
             try await refreshBalances(for: groupID)
             persist()
@@ -606,6 +632,30 @@ final class SplitStore {
                 break
             }
         }
+    }
+
+    private func refreshAuditEvents(for groupID: GroupID) async throws {
+        var cursor = Int64(0)
+        var refreshedEntries: [ExpenseAuditEntry] = []
+
+        while true {
+            let response = try await apiClient.fetchGroupEvents(groupID: groupID, after: cursor)
+            let entries = response.events.compactMap { ExpenseAuditEntry(groupID: groupID, pulledEvent: $0) }
+            refreshedEntries.append(contentsOf: entries)
+
+            guard let maxSequence = response.events.map(\.sequence).max() else { break }
+            cursor = maxSequence
+
+            if !response.hasMore {
+                break
+            }
+        }
+
+        guard !refreshedEntries.isEmpty else { return }
+        let pendingEntries = auditEvents.filter { $0.groupID == groupID && $0.isPending }
+        auditEvents.removeAll { $0.groupID == groupID }
+        auditEvents.append(contentsOf: deduplicatedAuditEvents(refreshedEntries + pendingEntries))
+        persist()
     }
 
     private func refreshExpenses(for groupID: GroupID) async throws {
@@ -694,10 +744,29 @@ final class SplitStore {
 
     private func upsertAuditEntry(_ auditEntry: ExpenseAuditEntry) {
         if let index = auditEvents.firstIndex(where: { $0.id == auditEntry.id }) {
-            auditEvents[index] = auditEntry
+            auditEvents[index] = mergedAuditEntry(existing: auditEvents[index], incoming: auditEntry)
         } else {
             auditEvents.append(auditEntry)
         }
+    }
+
+    private func deduplicatedAuditEvents(_ entries: [ExpenseAuditEntry]) -> [ExpenseAuditEntry] {
+        var entriesByID: [EventID: ExpenseAuditEntry] = [:]
+        for entry in entries {
+            if let existingEntry = entriesByID[entry.id] {
+                entriesByID[entry.id] = mergedAuditEntry(existing: existingEntry, incoming: entry)
+            } else {
+                entriesByID[entry.id] = entry
+            }
+        }
+        return Array(entriesByID.values)
+    }
+
+    private func mergedAuditEntry(existing: ExpenseAuditEntry, incoming: ExpenseAuditEntry) -> ExpenseAuditEntry {
+        var merged = incoming.isPending && !existing.isPending ? existing : incoming
+        merged.sequence = incoming.sequence ?? existing.sequence
+        merged.isPending = existing.isPending && incoming.isPending
+        return merged
     }
 
     private func applyLocalExpense(event: ExpenseEventRequest, groupID: GroupID) {
@@ -843,6 +912,8 @@ final class SplitStore {
     }
 
     private func persist() {
+        auditEvents = deduplicatedAuditEvents(auditEvents)
+
         do {
             let directoryURL = storageURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)

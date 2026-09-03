@@ -492,6 +492,10 @@ final class SplitStore {
             .sorted { $0.payload.occurredAt > $1.payload.occurredAt }
     }
 
+    func expense(id expenseID: ExpenseID) -> ExpenseRecord? {
+        expenses.first { $0.id == expenseID && $0.voidedAt == nil }
+    }
+
     func balances(for groupID: GroupID) -> GroupBalancesResponse? {
         groupBalances[groupID]
     }

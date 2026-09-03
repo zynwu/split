@@ -376,7 +376,15 @@ private struct GroupDetailView: View {
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(groupAuditEvents) { auditEvent in
-                        AuditEventRow(auditEvent: auditEvent, actor: store.actor(for: auditEvent.actorID))
+                        if store.expense(id: auditEvent.expenseID) != nil {
+                            NavigationLink {
+                                ExpenseDetailView(store: store, expenseID: auditEvent.expenseID)
+                            } label: {
+                                AuditEventRow(auditEvent: auditEvent, actor: store.actor(for: auditEvent.actorID))
+                            }
+                        } else {
+                            AuditEventRow(auditEvent: auditEvent, actor: store.actor(for: auditEvent.actorID))
+                        }
                     }
                 }
             }
@@ -742,6 +750,52 @@ private struct ManualSplitRow: View {
                     .font(.body.monospacedDigit())
             }
         }
+    }
+}
+
+private struct ExpenseDetailView: View {
+    @Bindable var store: SplitStore
+    let expenseID: ExpenseID
+
+    private var expense: ExpenseRecord? {
+        store.expense(id: expenseID)
+    }
+
+    private var includedSplits: [ExpenseSplit] {
+        guard let expense else { return [] }
+        return expense.payload.splits.filter { ($0.amountMinorUnits ?? 0) != 0 }
+    }
+
+    var body: some View {
+        List {
+            if let expense {
+                Section("Expense") {
+                    LabeledContent("Name", value: expense.payload.name)
+                    LabeledContent("Total", value: MoneyText.display(expense.payload.totalMinorUnits, currencyCode: expense.payload.currencyCode))
+                    LabeledContent("Paid by", value: store.actor(for: expense.payload.payerActorID)?.displayName ?? expense.payload.payerActorID.rawValue)
+                }
+
+                Section("Splits") {
+                    if includedSplits.isEmpty {
+                        Text("No split amounts yet")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(includedSplits) { split in
+                            HStack {
+                                Text(store.actor(for: split.actorID)?.displayName ?? split.actorID.rawValue)
+                                Spacer()
+                                Text(MoneyText.display(split.amountMinorUnits ?? 0, currencyCode: expense.payload.currencyCode))
+                                    .font(.body.monospacedDigit())
+                            }
+                        }
+                    }
+                }
+            } else {
+                Text("Expense not found")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle(expense?.payload.name ?? "Expense")
     }
 }
 

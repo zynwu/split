@@ -636,7 +636,7 @@ final class SplitStore {
         defer { syncingGroupIDs.remove(groupID) }
 
         do {
-            try await refreshGroups()
+            try await fetchGroups()
             try await postPendingEvents(for: groupID)
             try await pullRemoteEvents(for: groupID)
             try await refreshAuditEvents(for: groupID)
@@ -662,15 +662,19 @@ final class SplitStore {
 
     private func refreshGroupsInBackground() {
         Task {
-            do {
-                try await refreshGroups()
-            } catch {
-                // Keep showing local groups when a background refresh fails.
-            }
+            await refreshGroups()
         }
     }
 
-    private func refreshGroups() async throws {
+    func refreshGroups() async {
+        do {
+            try await fetchGroups()
+        } catch {
+            registrationStatus = .failed(error.localizedDescription)
+        }
+    }
+
+    private func fetchGroups() async throws {
         let serverGroups = try await apiClient.fetchGroups()
         applyServerGroups(serverGroups)
     }

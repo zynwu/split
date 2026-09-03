@@ -47,6 +47,9 @@ struct ContentView: View {
                         }
                     }
                 }
+                .refreshable {
+                    await store.refreshGroups()
+                }
                 .navigationTitle("Split")
                 .navigationDestination(for: GroupID.self) { groupID in
                     GroupDetailView(store: store, groupID: groupID)
@@ -401,6 +404,9 @@ private struct GroupDetailView: View {
                     .foregroundStyle(.secondary)
             }
         }
+        .refreshable {
+            await store.syncGroup(id: groupID)
+        }
     }
 
     private var activityList: some View {
@@ -424,6 +430,9 @@ private struct GroupDetailView: View {
                 }
             }
 
+        }
+        .refreshable {
+            await store.syncGroup(id: groupID)
         }
     }
 }

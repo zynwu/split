@@ -45,7 +45,7 @@ Create a group with:
 curl -X POST http://localhost:8080/api/groups \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer <auth_token-from-register>' \
-  -d '{"name":"Weekend trip"}'
+  -d '{"name":"Weekend trip","display_name":"Alice"}'
 ```
 
 List the groups for the authenticated device with:
@@ -67,8 +67,26 @@ Join another group with its six-letter join code:
 curl -X POST http://localhost:8080/api/groups/join \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer <auth_token-from-register>' \
-  -d '{"join_code":"ABCDXY"}'
+  -d '{"join_code":"ABCDXY","display_name":"Alice"}'
 ```
+
+`display_name` is the canonical initial name for the actor this device gets
+in the group. It is trimmed and limited to 255 characters. Older clients that
+omit it use `Me`.
+
+Update an active actor's name within a group with:
+
+```sh
+curl -X PATCH "http://localhost:8080/api/groups/<group-uuid>/actors/<actor-uuid>" \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <auth_token-from-register>' \
+  -d '{"display_name":"Alice W."}'
+```
+
+The response contains the updated `actor_uuid` and `display_name`. Any active
+member of the group may rename an active actor under the current trusted-group
+model. Group actor names are server-backed and are returned by the groups and
+balances APIs.
 
 `POST /api/register` and `GET /api/healthz` are public. Other current API routes
 require the bearer token. The server stores only a hash of the token; whoever
@@ -233,7 +251,7 @@ The API currently creates rows in `groups`, which has a UUID, name, and
 creation timestamp and a unique six-letter join code. Creating a group also
 creates the creator's durable actor identity and active device binding.
 `group_actors` stores the durable actor identity for each group member.
-`devices` stores normally stable device identifiers, and
+Each actor can have a group-scoped `display_name`. `devices` stores normally stable device identifiers, and
 `actor_device_bindings` records the history of which device represented which
 actor when a device is replaced or an actor is reclaimed. Transactions should
 reference both `actor_uuid` and `device_id` so identity corrections do not

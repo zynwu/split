@@ -18,11 +18,16 @@ const (
 	joinCodeLength   = 6
 )
 
-func (database *Database) CreateGroup(ctx context.Context, name, deviceID string) (GroupMembership, error) {
+func (database *Database) CreateGroup(ctx context.Context, name, displayName, deviceID string) (GroupMembership, error) {
+	displayName, err := NormalizeDisplayName(displayName)
+	if err != nil {
+		return GroupMembership{}, err
+	}
+
 	const maxJoinCodeAttempts = 5
 
 	for attempt := 0; attempt < maxJoinCodeAttempts; attempt++ {
-		membership, retry, err := database.createGroupAttempt(ctx, name, deviceID)
+		membership, retry, err := database.createGroupAttempt(ctx, name, displayName, deviceID)
 		if err != nil {
 			return GroupMembership{}, err
 		}
@@ -34,7 +39,7 @@ func (database *Database) CreateGroup(ctx context.Context, name, deviceID string
 	return GroupMembership{}, fmt.Errorf("generate a unique group join code after %d attempts", maxJoinCodeAttempts)
 }
 
-func (database *Database) createGroupAttempt(ctx context.Context, name, deviceID string) (GroupMembership, bool, error) {
+func (database *Database) createGroupAttempt(ctx context.Context, name, displayName, deviceID string) (GroupMembership, bool, error) {
 	groupUUID, err := uuid.NewRandom()
 	if err != nil {
 		return GroupMembership{}, false, fmt.Errorf("generate group uuid: %w", err)
@@ -80,8 +85,8 @@ func (database *Database) createGroupAttempt(ctx context.Context, name, deviceID
 	}
 
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO group_actors (actor_uuid, group_uuid)
-		VALUES ($1, $2)`, actorUUID.String(), groupUUID.String()); err != nil {
+		INSERT INTO group_actors (actor_uuid, group_uuid, display_name)
+		VALUES ($1, $2, $3)`, actorUUID.String(), groupUUID.String(), displayName); err != nil {
 		return GroupMembership{}, false, fmt.Errorf("insert group actor: %w", err)
 	}
 
@@ -162,7 +167,12 @@ func (database *Database) ListGroupsForDevice(ctx context.Context, deviceID stri
 	return groups, nil
 }
 
-func (database *Database) JoinGroup(ctx context.Context, deviceID, joinCode string) (GroupMembership, error) {
+func (database *Database) JoinGroup(ctx context.Context, deviceID, joinCode, displayName string) (GroupMembership, error) {
+	displayName, err := NormalizeDisplayName(displayName)
+	if err != nil {
+		return GroupMembership{}, err
+	}
+
 	groupTransaction, err := database.db.BeginTx(ctx, nil)
 	if err != nil {
 		return GroupMembership{}, fmt.Errorf("begin group join transaction: %w", err)
@@ -191,14 +201,26 @@ func (database *Database) JoinGroup(ctx context.Context, deviceID, joinCode stri
 	}
 
 	var existingActorUUID string
+	var existingDisplayName sql.NullString
 	err = groupTransaction.QueryRowContext(ctx, `
-		SELECT actor_uuid
-		FROM actor_device_bindings
-		WHERE group_uuid = $1
-			AND device_id = $2
-			AND unbound_at IS NULL
-		FOR UPDATE`, group.UUID, deviceID).Scan(&existingActorUUID)
+		SELECT binding.actor_uuid, actor.display_name
+		FROM actor_device_bindings AS binding
+		JOIN group_actors AS actor
+			ON actor.group_uuid = binding.group_uuid
+			AND actor.actor_uuid = binding.actor_uuid
+		WHERE binding.group_uuid = $1
+			AND binding.device_id = $2
+			AND binding.unbound_at IS NULL
+		FOR UPDATE`, group.UUID, deviceID).Scan(&existingActorUUID, &existingDisplayName)
 	if err == nil {
+		if !existingDisplayName.Valid || existingDisplayName.String == "" {
+			if _, err := groupTransaction.ExecContext(ctx, `
+				UPDATE group_actors
+				SET display_name = $3
+				WHERE group_uuid = $1 AND actor_uuid = $2`, group.UUID, existingActorUUID, displayName); err != nil {
+				return GroupMembership{}, fmt.Errorf("set existing actor display name: %w", err)
+			}
+		}
 		if err := groupTransaction.Commit(); err != nil {
 			return GroupMembership{}, fmt.Errorf("commit existing group membership: %w", err)
 		}
@@ -221,8 +243,8 @@ func (database *Database) JoinGroup(ctx context.Context, deviceID, joinCode stri
 	}
 
 	if _, err := groupTransaction.ExecContext(ctx, `
-		INSERT INTO group_actors (actor_uuid, group_uuid)
-		VALUES ($1, $2)`, actorUUID.String(), group.UUID); err != nil {
+		INSERT INTO group_actors (actor_uuid, group_uuid, display_name)
+		VALUES ($1, $2, $3)`, actorUUID.String(), group.UUID, displayName); err != nil {
 		return GroupMembership{}, fmt.Errorf("insert joining group actor: %w", err)
 	}
 

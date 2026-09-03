@@ -14,12 +14,16 @@ import (
 )
 
 type createGroupRequest struct {
-	Name string `json:"name"`
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name"`
 }
 
 type joinGroupRequest struct {
-	JoinCode string `json:"join_code"`
+	JoinCode    string `json:"join_code"`
+	DisplayName string `json:"display_name"`
 }
+
+const defaultActorDisplayName = "Me"
 
 func rootHandler(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
@@ -76,7 +80,7 @@ func joinGroupHandler(db *database.Database) http.HandlerFunc {
 		decoder := json.NewDecoder(io.LimitReader(request.Body, 1<<20))
 		if err := decoder.Decode(&payload); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{
-				"error": "request body must be valid JSON with a join_code",
+				"error": "request body must be valid JSON with a join_code and display_name",
 			})
 			return
 		}
@@ -89,6 +93,14 @@ func joinGroupHandler(db *database.Database) http.HandlerFunc {
 			return
 		}
 
+		displayName, err := normalizeInitialActorDisplayName(payload.DisplayName)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": err.Error(),
+			})
+			return
+		}
+
 		deviceID, ok := deviceIDFromContext(request.Context())
 		if !ok {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{
@@ -97,11 +109,17 @@ func joinGroupHandler(db *database.Database) http.HandlerFunc {
 			return
 		}
 
-		group, err := db.JoinGroup(request.Context(), deviceID, joinCode)
+		group, err := db.JoinGroup(request.Context(), deviceID, joinCode, displayName)
 		if err != nil {
 			if errors.Is(err, database.ErrGroupNotFound) {
 				writeJSON(w, http.StatusNotFound, map[string]string{
 					"error": "group not found",
+				})
+				return
+			}
+			if errors.Is(err, database.ErrInvalidDisplayName) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{
+					"error": err.Error(),
 				})
 				return
 			}
@@ -132,13 +150,13 @@ func normalizeJoinCode(value string) (string, bool) {
 	return code, true
 }
 
-func createGroupHandler(database *database.Database) http.HandlerFunc {
+func createGroupHandler(db *database.Database) http.HandlerFunc {
 	return func(w http.ResponseWriter, request *http.Request) {
 		var payload createGroupRequest
 		decoder := json.NewDecoder(io.LimitReader(request.Body, 1<<20))
 		if err := decoder.Decode(&payload); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{
-				"error": "request body must be valid JSON with a name",
+				"error": "request body must be valid JSON with a name and display_name",
 			})
 			return
 		}
@@ -151,6 +169,14 @@ func createGroupHandler(database *database.Database) http.HandlerFunc {
 			return
 		}
 
+		displayName, err := normalizeInitialActorDisplayName(payload.DisplayName)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": err.Error(),
+			})
+			return
+		}
+
 		deviceID, ok := deviceIDFromContext(request.Context())
 		if !ok {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{
@@ -159,8 +185,14 @@ func createGroupHandler(database *database.Database) http.HandlerFunc {
 			return
 		}
 
-		group, err := database.CreateGroup(request.Context(), name, deviceID)
+		group, err := db.CreateGroup(request.Context(), name, displayName, deviceID)
 		if err != nil {
+			if errors.Is(err, database.ErrInvalidDisplayName) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{
+					"error": err.Error(),
+				})
+				return
+			}
 			log.Printf("creating group failed: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{
 				"error": "could not create group",
@@ -170,6 +202,13 @@ func createGroupHandler(database *database.Database) http.HandlerFunc {
 
 		writeJSON(w, http.StatusCreated, group)
 	}
+}
+
+func normalizeInitialActorDisplayName(value string) (string, error) {
+	if strings.TrimSpace(value) == "" {
+		value = defaultActorDisplayName
+	}
+	return database.NormalizeDisplayName(value)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

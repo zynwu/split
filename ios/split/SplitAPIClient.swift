@@ -49,10 +49,40 @@ struct GroupsResponse: Decodable {
 
 struct CreateGroupRequest: Encodable {
     let name: String
+    let displayName: String
+
+    private enum CodingKeys: String, CodingKey {
+        case name
+        case displayName = "display_name"
+    }
+
+    init(name: String, displayName: String) {
+        self.name = name
+        self.displayName = displayName
+    }
 }
 
 struct JoinGroupRequest: Encodable {
-    let join_code: String
+    let joinCode: String
+    let displayName: String
+
+    private enum CodingKeys: String, CodingKey {
+        case joinCode = "join_code"
+        case displayName = "display_name"
+    }
+
+    init(joinCode: String, displayName: String) {
+        self.joinCode = joinCode
+        self.displayName = displayName
+    }
+}
+
+struct UpdateActorDisplayNameRequest: Encodable {
+    let displayName: String
+
+    private enum CodingKeys: String, CodingKey {
+        case displayName = "display_name"
+    }
 }
 
 struct ServerActor: Decodable, Hashable {
@@ -685,17 +715,24 @@ struct SplitAPIClient {
         return response.groups
     }
 
-    func createGroup(named name: String) async throws -> ServerGroup {
+    func createGroup(named name: String, displayName: String = "Me") async throws -> ServerGroup {
         var request = try authorizedRequest(path: "/groups", method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try encoder.encode(CreateGroupRequest(name: name))
+        request.httpBody = try encoder.encode(CreateGroupRequest(name: name, displayName: displayName))
         return try await send(request)
     }
 
-    func joinGroup(with joinCode: String) async throws -> ServerGroup {
+    func joinGroup(with joinCode: String, displayName: String = "Me") async throws -> ServerGroup {
         var request = try authorizedRequest(path: "/groups/join", method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try encoder.encode(JoinGroupRequest(join_code: joinCode))
+        request.httpBody = try encoder.encode(JoinGroupRequest(joinCode: joinCode, displayName: displayName))
+        return try await send(request)
+    }
+
+    func updateActorDisplayName(groupID: GroupID, actorID: ActorID, displayName: String) async throws -> ServerActor {
+        var request = try authorizedRequest(path: "/groups/\(groupID.rawValue)/actors/\(actorID.rawValue)", method: "PATCH")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(UpdateActorDisplayNameRequest(displayName: displayName))
         return try await send(request)
     }
 

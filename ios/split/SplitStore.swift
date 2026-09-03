@@ -451,7 +451,7 @@ final class SplitStore {
         guard !cleanName.isEmpty else { return }
 
         do {
-            let serverGroup = try await apiClient.createGroup(named: cleanName)
+            let serverGroup = try await apiClient.createGroup(named: cleanName, displayName: displayName)
             applyServerGroup(serverGroup)
             await syncGroup(id: serverGroup.id)
         } catch {
@@ -464,9 +464,27 @@ final class SplitStore {
         guard !cleanCode.isEmpty else { return }
 
         do {
-            let serverGroup = try await apiClient.joinGroup(with: cleanCode)
+            let serverGroup = try await apiClient.joinGroup(with: cleanCode, displayName: displayName)
             applyServerGroup(serverGroup)
             await syncGroup(id: serverGroup.id)
+        } catch {
+            registrationStatus = .failed(error.localizedDescription)
+        }
+    }
+
+    func updateActorDisplayName(in groupID: GroupID, actorID: ActorID, to displayName: String) async {
+        let cleanName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanName.isEmpty else { return }
+        guard let group = groups.first(where: { $0.id == groupID }), group.actorIDs.contains(actorID) else { return }
+
+        do {
+            let serverActor = try await apiClient.updateActorDisplayName(
+                groupID: groupID,
+                actorID: actorID,
+                displayName: cleanName
+            )
+            upsertActor(serverActor, isLocal: actorID == group.localActorID)
+            persist()
         } catch {
             registrationStatus = .failed(error.localizedDescription)
         }
@@ -892,7 +910,7 @@ final class SplitStore {
     private func upsertActors(from serverGroup: ServerGroup) {
         for serverActor in serverGroup.actors {
             if serverActor.id == serverGroup.actorID {
-                upsertLocalActor(id: serverActor.id)
+                upsertLocalActor(id: serverActor.id, serverDisplayName: serverActor.displayName)
             } else {
                 upsertRemoteActor(id: serverActor.id, displayName: serverActor.displayName)
             }
@@ -900,6 +918,14 @@ final class SplitStore {
 
         if !serverGroup.actors.contains(where: { $0.id == serverGroup.actorID }) {
             upsertLocalActor(id: serverGroup.actorID)
+        }
+    }
+
+    private func upsertActor(_ serverActor: ServerActor, isLocal: Bool) {
+        if isLocal {
+            upsertLocalActor(id: serverActor.id, serverDisplayName: serverActor.displayName)
+        } else {
+            upsertRemoteActor(id: serverActor.id, displayName: serverActor.displayName)
         }
     }
 
@@ -943,12 +969,15 @@ final class SplitStore {
         persist()
     }
 
-    private func upsertLocalActor(id actorID: ActorID) {
+    private func upsertLocalActor(id actorID: ActorID, serverDisplayName: String? = nil) {
+        let serverName = serverDisplayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedName = serverName.flatMap { $0.isEmpty ? nil : $0 } ?? displayName
+
         if let index = actors.firstIndex(where: { $0.id == actorID }) {
-            actors[index].displayName = displayName
+            actors[index].displayName = resolvedName
             actors[index].deviceID = deviceID
         } else {
-            actors.append(Actor(id: actorID, displayName: displayName, deviceID: deviceID, isLocal: true))
+            actors.append(Actor(id: actorID, displayName: resolvedName, deviceID: deviceID, isLocal: true))
         }
     }
 

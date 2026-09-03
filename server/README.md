@@ -171,6 +171,42 @@ values unchanged when retrying the event. To void an expense, use
 expense and its history available; the projection returns its `voided_at`
 timestamp.
 
+The same edit can be sent through the dedicated full-replacement endpoint:
+
+```sh
+curl -X PUT "http://localhost:8080/api/groups/<group-uuid>/expenses/<expense-uuid>" \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <auth_token-from-register>' \
+  -d '{
+    "event_uuid":"<new-event-uuid>",
+    "actor_uuid":"<authenticated-member-actor-uuid>",
+    "event_created_at":"2026-09-01T20:00:00Z",
+    "client_sequence":1,
+    "base_sequence":1,
+    "payload_version":1,
+    "payload":{
+      "name":"Dinner (updated)",
+      "description":"Friday dinner with dessert",
+      "currency_code":"USD",
+      "total_minor_units":4800,
+      "payer_actor_uuid":"<payer-actor-uuid>",
+      "split_method":"equal",
+      "split_config":{},
+      "occurred_at":"2026-09-01T19:30:00Z",
+      "splits":[
+        {"actor_uuid":"<actor-1-uuid>"},
+        {"actor_uuid":"<actor-2-uuid>"}
+      ]
+    }
+  }'
+```
+
+`PUT /api/groups/<group-uuid>/expenses/<expense-uuid>` is a full replacement,
+not a partial update. It appends an `expense.updated` ledger event, preserves
+the previous version in the event log, and returns the same event/expense
+result as the generic ledger endpoint. The route requires the expense to
+already exist; it cannot create a new expense.
+
 Health check: `GET http://localhost:8080/api/healthz`
 
 ## Database migrations

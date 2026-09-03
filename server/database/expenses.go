@@ -206,6 +206,9 @@ func (database *Database) AppendLedgerEvent(ctx context.Context, deviceID string
 			return AppendLedgerEventResult{}, err
 		}
 	}
+	if normalized.EventType == "expense.updated" && !currentExpenseExists {
+		return AppendLedgerEventResult{}, ErrExpenseNotFound
+	}
 	if (normalized.EventType == "expense.voided" || normalized.EventType == "expense.deleted") && !currentExpenseExists {
 		return AppendLedgerEventResult{}, ErrExpenseNotFound
 	}

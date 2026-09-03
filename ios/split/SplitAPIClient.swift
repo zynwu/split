@@ -120,7 +120,7 @@ struct ServerGroup: Decodable {
     }
 }
 
-struct GroupBalancesResponse: Decodable, Hashable {
+struct GroupBalancesResponse: Codable, Hashable {
     let groupID: GroupID
     let currentActorID: ActorID
     let asOfSequence: Int64
@@ -140,9 +140,17 @@ struct GroupBalancesResponse: Decodable, Hashable {
         self.asOfSequence = try container.decode(Int64.self, forKey: .as_of_sequence)
         self.currencyBalances = try container.decode([CurrencyBalance].self, forKey: .currency_balances)
     }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(groupID.rawValue, forKey: .group_uuid)
+        try container.encode(currentActorID.rawValue, forKey: .current_actor_uuid)
+        try container.encode(asOfSequence, forKey: .as_of_sequence)
+        try container.encode(currencyBalances, forKey: .currency_balances)
+    }
 }
 
-struct CurrencyBalance: Decodable, Hashable, Identifiable {
+struct CurrencyBalance: Codable, Hashable, Identifiable {
     var id: String { currencyCode }
     let currencyCode: String
     let memberBalances: [BalanceMember]
@@ -160,9 +168,16 @@ struct CurrencyBalance: Decodable, Hashable, Identifiable {
         self.memberBalances = try container.decode([BalanceMember].self, forKey: .member_balances)
         self.suggestedTransfers = try container.decode([SuggestedTransfer].self, forKey: .suggested_transfers)
     }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(currencyCode, forKey: .currency_code)
+        try container.encode(memberBalances, forKey: .member_balances)
+        try container.encode(suggestedTransfers, forKey: .suggested_transfers)
+    }
 }
 
-struct BalanceMember: Decodable, Hashable, Identifiable {
+struct BalanceMember: Codable, Hashable, Identifiable {
     var id: ActorID { actorID }
     let actorID: ActorID
     let displayName: String
@@ -180,9 +195,16 @@ struct BalanceMember: Decodable, Hashable, Identifiable {
         self.displayName = try container.decodeIfPresent(String.self, forKey: .display_name) ?? ""
         self.netMinorUnits = try container.decode(Int64.self, forKey: .net_minor_units)
     }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(actorID.rawValue, forKey: .actor_uuid)
+        try container.encode(displayName, forKey: .display_name)
+        try container.encode(netMinorUnits, forKey: .net_minor_units)
+    }
 }
 
-struct SuggestedTransfer: Decodable, Hashable, Identifiable {
+struct SuggestedTransfer: Codable, Hashable, Identifiable {
     var id: String { "\(fromActorID.rawValue)-\(toActorID.rawValue)" }
     let fromActorID: ActorID
     let toActorID: ActorID
@@ -199,6 +221,13 @@ struct SuggestedTransfer: Decodable, Hashable, Identifiable {
         self.fromActorID = ActorID(rawValue: try container.decode(String.self, forKey: .from_actor_uuid))
         self.toActorID = ActorID(rawValue: try container.decode(String.self, forKey: .to_actor_uuid))
         self.amountMinorUnits = try container.decode(Int64.self, forKey: .amount_minor_units)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(fromActorID.rawValue, forKey: .from_actor_uuid)
+        try container.encode(toActorID.rawValue, forKey: .to_actor_uuid)
+        try container.encode(amountMinorUnits, forKey: .amount_minor_units)
     }
 }
 

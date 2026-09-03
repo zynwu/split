@@ -218,6 +218,7 @@ struct SplitSnapshot: Codable {
     var expenses: [ExpenseRecord]
     var pendingEvents: [PendingExpenseEvent]
     var auditEvents: [ExpenseAuditEntry]
+    var groupBalances: [GroupID: GroupBalancesResponse]
     var nextClientSequence: Int64
 
     private enum CodingKeys: String, CodingKey {
@@ -228,6 +229,7 @@ struct SplitSnapshot: Codable {
         case expenses
         case pendingEvents
         case auditEvents
+        case groupBalances
         case nextClientSequence
     }
 
@@ -238,6 +240,7 @@ struct SplitSnapshot: Codable {
         expenses: [ExpenseRecord],
         pendingEvents: [PendingExpenseEvent],
         auditEvents: [ExpenseAuditEntry],
+        groupBalances: [GroupID: GroupBalancesResponse],
         nextClientSequence: Int64
     ) {
         self.migratedDeviceID = nil
@@ -247,6 +250,7 @@ struct SplitSnapshot: Codable {
         self.expenses = expenses
         self.pendingEvents = pendingEvents
         self.auditEvents = auditEvents
+        self.groupBalances = groupBalances
         self.nextClientSequence = nextClientSequence
     }
 
@@ -258,6 +262,7 @@ struct SplitSnapshot: Codable {
         self.expenses = try container.decodeIfPresent([ExpenseRecord].self, forKey: .expenses) ?? []
         self.pendingEvents = try container.decodeIfPresent([PendingExpenseEvent].self, forKey: .pendingEvents) ?? []
         self.auditEvents = try container.decodeIfPresent([ExpenseAuditEntry].self, forKey: .auditEvents) ?? pendingEvents.map { ExpenseAuditEntry(groupID: $0.groupID, event: $0.event, isPending: true) }
+        self.groupBalances = try container.decodeIfPresent([GroupID: GroupBalancesResponse].self, forKey: .groupBalances) ?? [:]
         self.nextClientSequence = try container.decodeIfPresent(Int64.self, forKey: .nextClientSequence) ?? 0
 
         if let displayName = try container.decodeIfPresent(String.self, forKey: .displayName) {
@@ -277,6 +282,7 @@ struct SplitSnapshot: Codable {
         try container.encode(expenses, forKey: .expenses)
         try container.encode(pendingEvents, forKey: .pendingEvents)
         try container.encode(auditEvents, forKey: .auditEvents)
+        try container.encode(groupBalances, forKey: .groupBalances)
         try container.encode(nextClientSequence, forKey: .nextClientSequence)
     }
 }
@@ -372,7 +378,7 @@ final class SplitStore {
             self.expenses = snapshot.expenses
             self.pendingEvents = snapshot.pendingEvents
             self.auditEvents = snapshot.auditEvents
-            self.groupBalances = [:]
+            self.groupBalances = snapshot.groupBalances
             self.nextClientSequence = snapshot.nextClientSequence
             ensureLocalActorsExist()
         } else {
@@ -847,6 +853,7 @@ final class SplitStore {
                 expenses: expenses,
                 pendingEvents: pendingEvents,
                 auditEvents: auditEvents,
+                groupBalances: groupBalances,
                 nextClientSequence: nextClientSequence
             )
             let data = try encoder.encode(snapshot)

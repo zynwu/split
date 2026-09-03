@@ -251,6 +251,7 @@ private struct GroupDetailView: View {
     @Bindable var store: SplitStore
     let groupID: GroupID
     @State private var isShowingAddExpense = false
+    @State private var isShowingEditGroupName = false
     @State private var activeActorNameEdit: ActorNameEdit?
     @State private var selectedTab: GroupDetailTab = .balances
 
@@ -306,6 +307,18 @@ private struct GroupDetailView: View {
             }
         }
         .navigationTitle(group?.name ?? "Group")
+        .toolbar {
+            if group != nil {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        isShowingEditGroupName = true
+                    } label: {
+                        Image(systemName: "pencil")
+                    }
+                    .accessibilityLabel("Edit group name")
+                }
+            }
+        }
         .task(id: groupID) {
             await store.syncGroup(id: groupID)
         }
@@ -325,6 +338,15 @@ private struct GroupDetailView: View {
                     )
                 }
                 .presentationDetents([.large])
+            }
+        }
+        .sheet(isPresented: $isShowingEditGroupName) {
+            if let group {
+                EditGroupNameSheet(group: group) { name in
+                    let splitStore = store
+                    await splitStore.updateGroupName(in: group.id, to: name)
+                }
+                .presentationDetents([.medium])
             }
         }
         .sheet(item: $activeActorNameEdit) { edit in
@@ -577,6 +599,63 @@ private struct AuditEventRow: View {
                         .foregroundStyle(.secondary)
                 }
             }
+        }
+    }
+}
+
+private struct EditGroupNameSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String
+    @State private var isSaving = false
+
+    let group: ExpenseGroup
+    let saveName: (String) async -> Void
+
+    private var canSave: Bool {
+        !isSaving && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    init(group: ExpenseGroup, saveName: @escaping (String) async -> Void) {
+        self.group = group
+        self.saveName = saveName
+        self._name = State(initialValue: group.name)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Group Name") {
+                    TextField("Name", text: $name)
+                        .textInputAutocapitalization(.words)
+                        .onSubmit(save)
+                }
+            }
+            .navigationTitle("Edit Group")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                    .disabled(isSaving)
+                }
+
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(isSaving ? "Saving" : "Save", action: save)
+                        .disabled(!canSave)
+                }
+            }
+        }
+    }
+
+    private func save() {
+        guard canSave else { return }
+        isSaving = true
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        Task {
+            await saveName(cleanName)
+            isSaving = false
+            dismiss()
         }
     }
 }

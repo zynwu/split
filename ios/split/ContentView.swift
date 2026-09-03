@@ -44,7 +44,6 @@ struct ContentView: View {
                                     }
                                 }
                             }
-                            .onDelete(perform: deleteGroups)
                         }
                     }
                 }
@@ -96,11 +95,6 @@ struct ContentView: View {
         activeGroupSheet = .join
     }
 
-    private func deleteGroups(at offsets: IndexSet) {
-        for index in offsets.sorted(by: >) {
-            store.removeGroup(id: store.groups[index].id)
-        }
-    }
 }
 
 private enum GroupActionSheet: Identifiable {

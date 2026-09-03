@@ -251,6 +251,7 @@ private struct GroupDetailView: View {
     @Bindable var store: SplitStore
     let groupID: GroupID
     @State private var isShowingAddExpense = false
+    @State private var activeActorNameEdit: ActorNameEdit?
     @State private var selectedTab: GroupDetailTab = .balances
 
     private var group: ExpenseGroup? {
@@ -326,6 +327,13 @@ private struct GroupDetailView: View {
                 .presentationDetents([.large])
             }
         }
+        .sheet(item: $activeActorNameEdit) { edit in
+            EditActorDisplayNameSheet(actor: edit.actor) { displayName in
+                let splitStore = store
+                await splitStore.updateActorDisplayName(in: edit.groupID, actorID: edit.actor.id, to: displayName)
+            }
+            .presentationDetents([.medium])
+        }
     }
 
     private var balancesList: some View {
@@ -357,7 +365,12 @@ private struct GroupDetailView: View {
                 Section("Members") {
                     ForEach(group.actorIDs, id: \.self) { actorID in
                         if let actor = store.actor(for: actorID) {
-                            MemberRow(actor: actor)
+                            MemberRow(
+                                actor: actor,
+                                editName: actor.id == group.localActorID ? {
+                                    activeActorNameEdit = ActorNameEdit(groupID: group.id, actor: actor)
+                                } : nil
+                            )
                         }
                     }
                 }
@@ -390,6 +403,15 @@ private struct GroupDetailView: View {
             }
 
         }
+    }
+}
+
+private struct ActorNameEdit: Identifiable {
+    let groupID: GroupID
+    let actor: Actor
+
+    var id: String {
+        "\(groupID.rawValue)-\(actor.id.rawValue)"
     }
 }
 
@@ -479,6 +501,12 @@ private struct BalanceRow: View {
 
 private struct MemberRow: View {
     let actor: Actor
+    let editName: (() -> Void)?
+
+    init(actor: Actor, editName: (() -> Void)? = nil) {
+        self.actor = actor
+        self.editName = editName
+    }
 
     var body: some View {
         HStack {
@@ -496,6 +524,14 @@ private struct MemberRow: View {
             if actor.isLocal {
                 Image(systemName: "iphone")
                     .foregroundStyle(.secondary)
+            }
+
+            if let editName {
+                Button(action: editName) {
+                    Image(systemName: "pencil")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Edit display name")
             }
         }
     }
@@ -541,6 +577,63 @@ private struct AuditEventRow: View {
                         .foregroundStyle(.secondary)
                 }
             }
+        }
+    }
+}
+
+private struct EditActorDisplayNameSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var displayName: String
+    @State private var isSaving = false
+
+    let actor: Actor
+    let saveDisplayName: (String) async -> Void
+
+    private var canSave: Bool {
+        !isSaving && !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    init(actor: Actor, saveDisplayName: @escaping (String) async -> Void) {
+        self.actor = actor
+        self.saveDisplayName = saveDisplayName
+        self._displayName = State(initialValue: actor.displayName)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Display Name") {
+                    TextField("Name", text: $displayName)
+                        .textInputAutocapitalization(.words)
+                        .onSubmit(save)
+                }
+            }
+            .navigationTitle("Edit Name")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                    .disabled(isSaving)
+                }
+
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(isSaving ? "Saving" : "Save", action: save)
+                        .disabled(!canSave)
+                }
+            }
+        }
+    }
+
+    private func save() {
+        guard canSave else { return }
+        isSaving = true
+        let cleanName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        Task {
+            await saveDisplayName(cleanName)
+            isSaving = false
+            dismiss()
         }
     }
 }

@@ -7,11 +7,15 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 
 	"github.com/google/uuid"
 )
 
-var ErrGroupNotFound = errors.New("group not found")
+var (
+	ErrGroupNotFound    = errors.New("group not found")
+	ErrInvalidGroupName = errors.New("invalid group name")
+)
 
 const (
 	joinCodeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ"
@@ -19,7 +23,12 @@ const (
 )
 
 func (database *Database) CreateGroup(ctx context.Context, name, displayName, deviceID string) (GroupMembership, error) {
-	displayName, err := NormalizeDisplayName(displayName)
+	name, err := NormalizeGroupName(name)
+	if err != nil {
+		return GroupMembership{}, err
+	}
+
+	displayName, err = NormalizeDisplayName(displayName)
 	if err != nil {
 		return GroupMembership{}, err
 	}
@@ -165,6 +174,83 @@ func (database *Database) ListGroupsForDevice(ctx context.Context, deviceID stri
 	}
 
 	return groups, nil
+}
+
+// NormalizeGroupName trims a group name and enforces the same bounds used by
+// the groups.name database constraint.
+func NormalizeGroupName(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("%w: name must not be empty", ErrInvalidGroupName)
+	}
+	if len([]rune(value)) > 255 {
+		return "", fmt.Errorf("%w: name must be at most 255 characters", ErrInvalidGroupName)
+	}
+	return value, nil
+}
+
+// UpdateGroupName changes the name of a group for an active group member.
+func (database *Database) UpdateGroupName(ctx context.Context, groupUUID, deviceID, name string) (Group, error) {
+	groupUUID, err := normalizeUUID(groupUUID, "group_uuid")
+	if err != nil {
+		return Group{}, err
+	}
+	name, err = NormalizeGroupName(name)
+	if err != nil {
+		return Group{}, err
+	}
+
+	tx, err := database.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Group{}, fmt.Errorf("begin group name update transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var groupExists bool
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM groups
+			WHERE uuid = $1
+		)`, groupUUID).Scan(&groupExists); err != nil {
+		return Group{}, fmt.Errorf("check group name update group: %w", err)
+	}
+	if !groupExists {
+		return Group{}, ErrGroupNotFound
+	}
+
+	member, err := activeGroupMembershipTx(ctx, tx, groupUUID, deviceID)
+	if err != nil {
+		return Group{}, fmt.Errorf("check group name update membership: %w", err)
+	}
+	if !member {
+		return Group{}, ErrGroupMembershipDenied
+	}
+
+	var group Group
+	err = tx.QueryRowContext(ctx, `
+		UPDATE groups
+		SET name = $2
+		WHERE uuid = $1
+		RETURNING uuid, name, creation_date, join_code, latest_event_sequence`, groupUUID, name).Scan(
+		&group.UUID,
+		&group.Name,
+		&group.CreationDate,
+		&group.JoinCode,
+		&group.LatestEventSequence,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Group{}, ErrGroupNotFound
+	}
+	if err != nil {
+		return Group{}, fmt.Errorf("update group name: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Group{}, fmt.Errorf("commit group name update: %w", err)
+	}
+
+	return group, nil
 }
 
 func (database *Database) JoinGroup(ctx context.Context, deviceID, joinCode, displayName string) (GroupMembership, error) {

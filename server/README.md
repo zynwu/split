@@ -88,6 +88,21 @@ member of the group may rename an active actor under the current trusted-group
 model. Group actor names are server-backed and are returned by the groups and
 balances APIs.
 
+Update a group's name with:
+
+```sh
+curl -X PATCH "http://localhost:8080/api/groups/<group-uuid>" \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <auth_token-from-register>' \
+  -d '{"name":"Updated group name"}'
+```
+
+The response contains the updated group metadata, including its `uuid`, `name`,
+`creation_date`, `join_code`, and `latest_event_sequence`. An active member is
+required. This metadata update does not create an expense ledger event or
+change the group's expense sequence; clients should refresh group metadata when
+syncing.
+
 `POST /api/register` and `GET /api/healthz` are public. Other current API routes
 require the bearer token. The server stores only a hash of the token; whoever
 possesses the token can act as that device, so it must be kept private.

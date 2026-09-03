@@ -85,6 +85,26 @@ struct UpdateActorDisplayNameRequest: Encodable {
     }
 }
 
+struct UpdateGroupNameRequest: Encodable {
+    let name: String
+}
+
+struct UpdatedGroupNameResponse: Decodable {
+    let id: GroupID
+    let name: String
+
+    private enum CodingKeys: String, CodingKey {
+        case uuid
+        case name
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = GroupID(rawValue: try container.decode(String.self, forKey: .uuid))
+        self.name = try container.decode(String.self, forKey: .name)
+    }
+}
+
 struct ServerActor: Decodable, Hashable {
     let id: ActorID
     let displayName: String?
@@ -733,6 +753,13 @@ struct SplitAPIClient {
         var request = try authorizedRequest(path: "/groups/\(groupID.rawValue)/actors/\(actorID.rawValue)", method: "PATCH")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(UpdateActorDisplayNameRequest(displayName: displayName))
+        return try await send(request)
+    }
+
+    func updateGroupName(groupID: GroupID, name: String) async throws -> UpdatedGroupNameResponse {
+        var request = try authorizedRequest(path: "/groups/\(groupID.rawValue)", method: "PATCH")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(UpdateGroupNameRequest(name: name))
         return try await send(request)
     }
 

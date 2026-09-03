@@ -161,10 +161,10 @@ func createGroupHandler(db *database.Database) http.HandlerFunc {
 			return
 		}
 
-		name := strings.TrimSpace(payload.Name)
-		if name == "" || len([]rune(name)) > 255 {
+		name, err := database.NormalizeGroupName(payload.Name)
+		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{
-				"error": "name must be between 1 and 255 characters",
+				"error": err.Error(),
 			})
 			return
 		}
@@ -187,7 +187,7 @@ func createGroupHandler(db *database.Database) http.HandlerFunc {
 
 		group, err := db.CreateGroup(request.Context(), name, displayName, deviceID)
 		if err != nil {
-			if errors.Is(err, database.ErrInvalidDisplayName) {
+			if errors.Is(err, database.ErrInvalidGroupName) || errors.Is(err, database.ErrInvalidDisplayName) {
 				writeJSON(w, http.StatusBadRequest, map[string]string{
 					"error": err.Error(),
 				})

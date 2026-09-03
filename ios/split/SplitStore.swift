@@ -490,6 +490,21 @@ final class SplitStore {
         }
     }
 
+    func updateGroupName(in groupID: GroupID, to name: String) async {
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanName.isEmpty else { return }
+        guard groups.contains(where: { $0.id == groupID }) else { return }
+
+        do {
+            let response = try await apiClient.updateGroupName(groupID: groupID, name: cleanName)
+            updateGroup(id: groupID) { group in
+                group.name = response.name
+            }
+        } catch {
+            registrationStatus = .failed(error.localizedDescription)
+        }
+    }
+
     func removeGroup(id: GroupID) {
         groups.removeAll { $0.id == id }
         expenses.removeAll { $0.groupID == id }

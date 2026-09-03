@@ -324,7 +324,8 @@ private struct GroupDetailView: View {
                         currencyCode: input.currencyCode,
                         totalMinorUnits: input.totalMinorUnits,
                         payerActorID: input.payerActorID,
-                        splitMethod: .equal,
+                        splitMethod: input.splitMethod,
+                        manualSplits: input.manualSplits,
                         occurredAt: Date()
                     )
                 }
@@ -557,6 +558,8 @@ private struct AddExpenseInput {
     let currencyCode: String
     let totalMinorUnits: Int64
     let payerActorID: ActorID
+    let splitMethod: SplitMethod
+    let manualSplits: [ExpenseSplit]?
 }
 
 private struct AddExpenseSheet: View {
@@ -565,6 +568,9 @@ private struct AddExpenseSheet: View {
     @State private var amount = ""
     @State private var currencyCode = "USD"
     @State private var payerActorRawValue: String
+    @State private var splitMethod: SplitMethod = .equal
+    @State private var includedActorIDs: Set<ActorID>
+    @State private var manualSplitAmounts: [ActorID: String] = [:]
     @State private var isSubmitting = false
 
     let group: ExpenseGroup
@@ -579,11 +585,39 @@ private struct AddExpenseSheet: View {
         MoneyText.minorUnits(from: amount)
     }
 
+    private var manualSplits: [ExpenseSplit]? {
+        guard splitMethod == .manual, let totalMinorUnits else { return nil }
+        let splits = actors.map { actor in
+            if includedActorIDs.contains(actor.id) {
+                let amountText = manualSplitAmounts[actor.id] ?? ""
+                guard !amountText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      let amount = MoneyText.minorUnits(from: amountText) else {
+                    return ExpenseSplit(actorID: actor.id, amountMinorUnits: nil)
+                }
+                return ExpenseSplit(actorID: actor.id, amountMinorUnits: amount)
+            }
+
+            return ExpenseSplit(actorID: actor.id, amountMinorUnits: 0)
+        }
+
+        guard splits.allSatisfy({ $0.amountMinorUnits != nil }) else { return nil }
+        let splitTotal = splits.reduce(Int64(0)) { total, split in
+            total + (split.amountMinorUnits ?? 0)
+        }
+        return splitTotal == totalMinorUnits ? splits : nil
+    }
+
     private var canSubmit: Bool {
-        !isSubmitting
+        let hasValidRequiredFields = !isSubmitting
             && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && totalMinorUnits != nil
             && selectedPayerID != nil
+
+        if splitMethod == .manual {
+            return hasValidRequiredFields && manualSplits != nil
+        }
+
+        return hasValidRequiredFields
     }
 
     init(
@@ -595,6 +629,7 @@ private struct AddExpenseSheet: View {
         self.actors = actors
         self.createExpense = createExpense
         self._payerActorRawValue = State(initialValue: group.localActorID.rawValue)
+        self._includedActorIDs = State(initialValue: Set(actors.map(\.id)))
     }
 
     var body: some View {
@@ -617,6 +652,32 @@ private struct AddExpenseSheet: View {
                     Picker("Paid by", selection: $payerActorRawValue) {
                         ForEach(actors) { actor in
                             Text(actor.displayName).tag(actor.id.rawValue)
+                        }
+                    }
+
+                    Picker("Split", selection: $splitMethod) {
+                        Text("Equal").tag(SplitMethod.equal)
+                        Text("Manual").tag(SplitMethod.manual)
+                    }
+                    .pickerStyle(.segmented)
+                }
+
+                if splitMethod == .manual {
+                    Section("Manual Splits") {
+                        ForEach(actors) { actor in
+                            ManualSplitRow(
+                                actor: actor,
+                                isIncluded: includedActorIDs.contains(actor.id),
+                                amount: manualSplitAmounts[actor.id] ?? "",
+                                toggleIncluded: { toggleActor(actor.id) },
+                                updateAmount: { manualSplitAmounts[actor.id] = $0 }
+                            )
+                        }
+
+                        if let totalMinorUnits, manualSplits == nil {
+                            Text("Manual splits must add up to \(MoneyText.display(totalMinorUnits, currencyCode: currencyCode.uppercased())).")
+                                .font(.caption)
+                                .foregroundStyle(.red)
                         }
                     }
                 }
@@ -646,13 +707,56 @@ private struct AddExpenseSheet: View {
             name: name.trimmingCharacters(in: .whitespacesAndNewlines),
             currencyCode: currencyCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased(),
             totalMinorUnits: totalMinorUnits,
-            payerActorID: selectedPayerID
+            payerActorID: selectedPayerID,
+            splitMethod: splitMethod,
+            manualSplits: splitMethod == .manual ? manualSplits : nil
         )
 
         Task {
             await createExpense(input)
             isSubmitting = false
             dismiss()
+        }
+    }
+
+    private func toggleActor(_ actorID: ActorID) {
+        if includedActorIDs.contains(actorID) {
+            includedActorIDs.remove(actorID)
+            manualSplitAmounts[actorID] = nil
+        } else {
+            includedActorIDs.insert(actorID)
+        }
+    }
+}
+
+private struct ManualSplitRow: View {
+    let actor: Actor
+    let isIncluded: Bool
+    let amount: String
+    let toggleIncluded: () -> Void
+    let updateAmount: (String) -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: toggleIncluded) {
+                Image(systemName: isIncluded ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(isIncluded ? .primary : .secondary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isIncluded ? "Exclude \(actor.displayName)" : "Include \(actor.displayName)")
+
+            Text(actor.displayName)
+
+            Spacer()
+
+            if isIncluded {
+                TextField("0.00", text: Binding(get: { amount }, set: updateAmount))
+                    .keyboardType(.decimalPad)
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 96)
+                    .font(.body.monospacedDigit())
+            }
         }
     }
 }

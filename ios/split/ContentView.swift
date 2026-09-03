@@ -1070,9 +1070,10 @@ private enum MoneyText {
     }
 
     static func display(_ minorUnits: Int64, currencyCode: String) -> String {
-        let major = minorUnits / 100
+        let sign = minorUnits < 0 ? "-" : ""
+        let major = abs(minorUnits / 100)
         let minor = abs(minorUnits % 100)
-        return "\(currencyCode) \(major).\(String(format: "%02lld", minor))"
+        return "\(currencyCode) \(sign)\(major).\(String(format: "%02lld", minor))"
     }
 
     static func inputText(_ minorUnits: Int64) -> String {

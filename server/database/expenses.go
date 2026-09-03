@@ -18,6 +18,7 @@ import (
 var (
 	ErrGroupMembershipDenied  = errors.New("device is not a member of the group")
 	ErrActorNotFound          = errors.New("actor not found in group")
+	ErrActorDeviceMismatch    = errors.New("event actor is not bound to the authenticated device")
 	ErrLedgerEventConflict    = errors.New("ledger event conflicts with an existing event")
 	ErrClientSequenceConflict = errors.New("client sequence conflicts with an existing event")
 	ErrUnsupportedEvent       = errors.New("unsupported ledger event")
@@ -153,6 +154,14 @@ func (database *Database) AppendLedgerEvent(ctx context.Context, deviceID string
 	}
 	if !actorExists {
 		return AppendLedgerEventResult{}, ErrActorNotFound
+	}
+
+	actorBound, err := activeActorDeviceBindingTx(ctx, tx, normalized.GroupUUID, normalized.ActorUUID, deviceID)
+	if err != nil {
+		return AppendLedgerEventResult{}, fmt.Errorf("check event actor device binding: %w", err)
+	}
+	if !actorBound {
+		return AppendLedgerEventResult{}, ErrActorDeviceMismatch
 	}
 
 	existingEvent, err := findLedgerEventByUUIDTx(ctx, tx, normalized.EventUUID)
@@ -880,6 +889,24 @@ func activeActorTx(ctx context.Context, tx *sql.Tx, groupUUID, actorUUID string)
 				AND actor_uuid = $2
 				AND archived_at IS NULL
 		)`, groupUUID, actorUUID).Scan(&exists)
+	return exists, err
+}
+
+func activeActorDeviceBindingTx(ctx context.Context, tx *sql.Tx, groupUUID, actorUUID, deviceID string) (bool, error) {
+	var exists bool
+	err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM actor_device_bindings AS binding
+			JOIN group_actors AS actor
+				ON actor.group_uuid = binding.group_uuid
+				AND actor.actor_uuid = binding.actor_uuid
+			WHERE binding.group_uuid = $1
+				AND binding.actor_uuid = $2
+				AND binding.device_id = $3
+				AND binding.unbound_at IS NULL
+				AND actor.archived_at IS NULL
+		)`, groupUUID, actorUUID, deviceID).Scan(&exists)
 	return exists, err
 }
 

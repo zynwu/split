@@ -196,6 +196,11 @@ current `version`, or if the event loses that timestamp comparison, the
 response has `"conflict":true`. A losing event remains in the ledger with
 `"applied":false` and does not overwrite the current projection.
 
+The top-level event `actor_uuid` must be the active actor currently bound to
+the authenticated device in that group. The payer and split actor UUIDs in the
+expense payload may refer to any active group actors, since a member can record
+an expense paid by or shared with someone else.
+
 For an edit, create and persist `event_created_at` on the client, keep the same
 `entity_uuid`, use a new `event_uuid` and the next device `client_sequence`, and
 set `base_sequence` to the expense's current `version`. Reuse all of those

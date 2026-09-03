@@ -205,6 +205,10 @@ func writeLedgerEventError(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusNotFound, map[string]string{
 			"error": "group or actor not found",
 		})
+	case errors.Is(err, database.ErrActorDeviceMismatch):
+		writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "event actor is not authorized for this device",
+		})
 	case errors.Is(err, database.ErrLedgerEventConflict), errors.Is(err, database.ErrClientSequenceConflict):
 		writeJSON(w, http.StatusConflict, map[string]string{
 			"error": "ledger event conflicts with an existing event",

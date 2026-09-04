@@ -530,16 +530,26 @@ private struct GroupDetailView: View {
                                 }
                             } else {
                                 AuditEventRow(auditEvent: auditEvent, actor: store.actor(for: auditEvent.actorID))
+                                    .padding(.trailing, 24)
                             }
                         case .payment(let paymentAuditEvent):
-                            NavigationLink {
-                                PaymentDetailView(store: store, paymentID: paymentAuditEvent.paymentID)
-                            } label: {
+                            if store.payment(id: paymentAuditEvent.paymentID) != nil {
+                                NavigationLink {
+                                    PaymentDetailView(store: store, paymentID: paymentAuditEvent.paymentID)
+                                } label: {
+                                    PaymentRow(
+                                        auditEvent: paymentAuditEvent,
+                                        fromActor: store.actor(for: paymentAuditEvent.fromActorID),
+                                        toActor: store.actor(for: paymentAuditEvent.toActorID)
+                                    )
+                                }
+                            } else {
                                 PaymentRow(
                                     auditEvent: paymentAuditEvent,
                                     fromActor: store.actor(for: paymentAuditEvent.fromActorID),
                                     toActor: store.actor(for: paymentAuditEvent.toActorID)
                                 )
+                                .padding(.trailing, 24)
                             }
                         }
                     }
@@ -862,25 +872,38 @@ private struct PaymentRow: View {
             "Updated payment"
         case "payment.voided":
             "Voided payment"
+        case "payment.deleted":
+            "Deleted payment"
         default:
             "Payment event"
         }
+    }
+
+    private var isVoided: Bool {
+        auditEvent.eventType == "payment.voided" || auditEvent.eventType == "payment.deleted"
     }
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
-                Text("\(fromActor?.displayName ?? "Unknown") paid \(toActor?.displayName ?? "Unknown")")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if isVoided {
+                    Text("Removed from balances")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("\(fromActor?.displayName ?? "Unknown") paid \(toActor?.displayName ?? "Unknown")")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Spacer()
 
             VStack(alignment: .trailing, spacing: 4) {
-                Text(MoneyText.display(auditEvent.amountMinorUnits, currencyCode: auditEvent.currencyCode))
+                Text(isVoided ? " " : MoneyText.display(auditEvent.amountMinorUnits, currencyCode: auditEvent.currencyCode))
                     .font(.body.monospacedDigit())
+                    .accessibilityHidden(isVoided)
 
                 if auditEvent.isPending {
                     Text("Pending")
@@ -892,6 +915,7 @@ private struct PaymentRow: View {
                         .foregroundStyle(.secondary)
                 }
             }
+
         }
     }
 }
@@ -913,20 +937,31 @@ private struct AuditEventRow: View {
         }
     }
 
+    private var isVoided: Bool {
+        auditEvent.eventType == .voided || auditEvent.eventType == .deleted
+    }
+
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
-                Text(actor?.displayName ?? auditEvent.actorID.rawValue)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if isVoided {
+                    Text("Removed from balances")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(actor?.displayName ?? auditEvent.actorID.rawValue)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Spacer()
 
             VStack(alignment: .trailing, spacing: 4) {
-                Text(MoneyText.display(auditEvent.totalMinorUnits, currencyCode: auditEvent.currencyCode))
+                Text(isVoided ? " " : MoneyText.display(auditEvent.totalMinorUnits, currencyCode: auditEvent.currencyCode))
                     .font(.body.monospacedDigit())
+                    .accessibilityHidden(isVoided)
 
                 if auditEvent.isPending {
                     Text("Pending")
@@ -938,6 +973,7 @@ private struct AuditEventRow: View {
                         .foregroundStyle(.secondary)
                 }
             }
+
         }
     }
 }
@@ -1070,10 +1106,12 @@ private struct RecordPaymentSheet: View {
     @State private var fromActorRawValue: String
     @State private var toActorRawValue: String
     @State private var isSubmitting = false
+    @State private var isConfirmingDelete = false
 
     let group: ExpenseGroup
     let actors: [Actor]
     let title: String
+    let deletePayment: (() async -> Void)?
     let recordPayment: (RecordPaymentInput) async -> Void
 
     private var selectedFromActorID: ActorID? {
@@ -1102,11 +1140,13 @@ private struct RecordPaymentSheet: View {
         actors: [Actor],
         payment: PaymentRecord? = nil,
         title: String = "Record Payment",
+        deletePayment: (() async -> Void)? = nil,
         recordPayment: @escaping (RecordPaymentInput) async -> Void
     ) {
         self.group = group
         self.actors = actors
         self.title = title
+        self.deletePayment = deletePayment
         self.recordPayment = recordPayment
 
         let fromActorID = payment?.payload.fromActorID ?? group.localActorID
@@ -1148,6 +1188,17 @@ private struct RecordPaymentSheet: View {
                             .foregroundStyle(.red)
                     }
                 }
+
+                if deletePayment != nil {
+                    Section {
+                        Button("Delete Payment", role: .destructive) {
+                            isConfirmingDelete = true
+                        }
+                        .disabled(isSubmitting)
+                    } footer: {
+                        Text("This removes the payment from balances while keeping it in the activity history.")
+                    }
+                }
             }
             .navigationTitle(title)
             .toolbar {
@@ -1163,6 +1214,25 @@ private struct RecordPaymentSheet: View {
                         .disabled(!canSubmit)
                 }
             }
+            .alert("Delete this payment?", isPresented: $isConfirmingDelete) {
+                Button("Delete Payment", role: .destructive) {
+                    delete()
+                }
+                Button("Cancel", role: .cancel) { }
+            } message: {
+                Text("This action cannot be undone, but the deletion will remain in the activity history.")
+            }
+        }
+    }
+
+    private func delete() {
+        guard !isSubmitting, let deletePayment else { return }
+        isSubmitting = true
+
+        Task {
+            await deletePayment()
+            isSubmitting = false
+            dismiss()
         }
     }
 
@@ -1207,10 +1277,12 @@ private struct AddExpenseSheet: View {
     @State private var includedActorIDs: Set<ActorID>
     @State private var manualSplitAmounts: [ActorID: String] = [:]
     @State private var isSubmitting = false
+    @State private var isConfirmingDelete = false
 
     let group: ExpenseGroup
     let actors: [Actor]
     let title: String
+    let deleteExpense: (() async -> Void)?
     let createExpense: (AddExpenseInput) async -> Void
 
     private var selectedPayerID: ActorID? {
@@ -1261,11 +1333,13 @@ private struct AddExpenseSheet: View {
         actors: [Actor],
         expense: ExpenseRecord? = nil,
         title: String = "Add Expense",
+        deleteExpense: (() async -> Void)? = nil,
         createExpense: @escaping (AddExpenseInput) async -> Void
     ) {
         self.group = group
         self.actors = actors
         self.title = title
+        self.deleteExpense = deleteExpense
         self.createExpense = createExpense
         self._name = State(initialValue: expense?.payload.name ?? "")
         self._amount = State(initialValue: expense.map { MoneyText.inputText($0.payload.totalMinorUnits) } ?? "")
@@ -1334,6 +1408,17 @@ private struct AddExpenseSheet: View {
                         }
                     }
                 }
+
+                if deleteExpense != nil {
+                    Section {
+                        Button("Delete Expense", role: .destructive) {
+                            isConfirmingDelete = true
+                        }
+                        .disabled(isSubmitting)
+                    } footer: {
+                        Text("This removes the expense from balances while keeping it in the activity history.")
+                    }
+                }
             }
             .navigationTitle(title)
             .toolbar {
@@ -1349,6 +1434,25 @@ private struct AddExpenseSheet: View {
                         .disabled(!canSubmit)
                 }
             }
+            .alert("Delete this expense?", isPresented: $isConfirmingDelete) {
+                Button("Delete Expense", role: .destructive) {
+                    delete()
+                }
+                Button("Cancel", role: .cancel) { }
+            } message: {
+                Text("This action cannot be undone, but the deletion will remain in the activity history.")
+            }
+        }
+    }
+
+    private func delete() {
+        guard !isSubmitting, let deleteExpense else { return }
+        isSubmitting = true
+
+        Task {
+            await deleteExpense()
+            isSubmitting = false
+            dismiss()
         }
     }
 
@@ -1464,7 +1568,15 @@ private struct PaymentDetailView: View {
         }
         .sheet(isPresented: $isShowingEditPayment) {
             if let payment, let group {
-                RecordPaymentSheet(group: group, actors: groupActors, payment: payment, title: "Edit Payment") { input in
+                RecordPaymentSheet(
+                    group: group,
+                    actors: groupActors,
+                    payment: payment,
+                    title: "Edit Payment",
+                    deletePayment: {
+                        await store.voidPayment(id: payment.id)
+                    }
+                ) { input in
                     await store.updatePayment(
                         id: payment.id,
                         fromActorID: input.fromActorID,
@@ -1589,7 +1701,15 @@ private struct ExpenseDetailView: View {
         }
         .sheet(isPresented: $isShowingEditExpense) {
             if let expense, let group {
-                AddExpenseSheet(group: group, actors: groupActors, expense: expense, title: "Edit Expense") { input in
+                AddExpenseSheet(
+                    group: group,
+                    actors: groupActors,
+                    expense: expense,
+                    title: "Edit Expense",
+                    deleteExpense: {
+                        await store.voidExpense(id: expense.id)
+                    }
+                ) { input in
                     await store.updateExpense(
                         id: expense.id,
                         name: input.name,

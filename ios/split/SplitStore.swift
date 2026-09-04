@@ -471,10 +471,20 @@ struct ExpenseAuditEntry: Codable, Hashable, Identifiable {
     let eventCreatedAt: Date
     var isPending: Bool
 
-    init?(groupID: GroupID, event: LedgerEventRequest, sequence: Int64? = nil, isPending: Bool) {
+    init?(
+        groupID: GroupID,
+        event: LedgerEventRequest,
+        sequence: Int64? = nil,
+        isPending: Bool,
+        fallbackExpense: ExpenseRecord? = nil
+    ) {
         guard event.entityType == "expense",
-              let eventType = ExpenseEventType(rawValue: event.eventType),
-              let payload = event.expensePayload() else { return nil }
+              let eventType = ExpenseEventType(rawValue: event.eventType) else { return nil }
+
+        let payload = event.expensePayload()
+        let isVoidEvent = eventType == .voided || eventType == .deleted
+        guard isVoidEvent || payload != nil else { return nil }
+        let resolvedPayload = payload ?? fallbackExpense?.payload
 
         let expenseID = ExpenseID(rawValue: event.entityID)
         self.id = event.eventID
@@ -483,24 +493,31 @@ struct ExpenseAuditEntry: Codable, Hashable, Identifiable {
         self.eventType = eventType
         self.actorID = event.actorID
         self.expenseID = expenseID
-        self.expenseName = payload.name
-        self.totalMinorUnits = payload.totalMinorUnits
-        self.currencyCode = payload.currencyCode
-        self.exchangeRateToUSD = nil
-        self.usdTotalMinorUnits = nil
-        self.rateSnapshotDate = nil
+        self.expenseName = resolvedPayload?.name ?? "Expense"
+        self.totalMinorUnits = resolvedPayload?.totalMinorUnits ?? 0
+        self.currencyCode = resolvedPayload?.currencyCode ?? "USD"
+        self.exchangeRateToUSD = fallbackExpense?.exchangeRateToUSD
+        self.usdTotalMinorUnits = fallbackExpense?.usdTotalMinorUnits
+        self.rateSnapshotDate = fallbackExpense?.rateSnapshotDate
         self.eventCreatedAt = event.eventCreatedAt
         self.isPending = isPending
     }
 
-    init?(groupID: GroupID, pulledEvent: PulledLedgerEvent) {
+    init?(
+        groupID: GroupID,
+        pulledEvent: PulledLedgerEvent,
+        fallbackExpense: ExpenseRecord? = nil
+    ) {
         guard pulledEvent.entityType == "expense",
               let eventType = pulledEvent.eventType.flatMap(ExpenseEventType.init(rawValue:)),
               let actorID = pulledEvent.actorID,
               let expenseID = pulledEvent.entityID.flatMap(ExpenseID.init(rawValue:)),
-              let eventCreatedAt = pulledEvent.eventCreatedAt,
-              let payloadValue = pulledEvent.payload,
-              let payload = try? payloadValue.decode(ExpensePayload.self) else { return nil }
+              let eventCreatedAt = pulledEvent.eventCreatedAt else { return nil }
+
+        let payload = pulledEvent.payload.flatMap { try? $0.decode(ExpensePayload.self) }
+        let isVoidEvent = eventType == .voided || eventType == .deleted
+        guard isVoidEvent || payload != nil else { return nil }
+        let resolvedPayload = payload ?? fallbackExpense?.payload
 
         self.id = pulledEvent.eventID
         self.groupID = groupID
@@ -508,12 +525,12 @@ struct ExpenseAuditEntry: Codable, Hashable, Identifiable {
         self.eventType = eventType
         self.actorID = actorID
         self.expenseID = expenseID
-        self.expenseName = payload.name
-        self.totalMinorUnits = payload.totalMinorUnits
-        self.currencyCode = payload.currencyCode
-        self.exchangeRateToUSD = pulledEvent.exchangeRateToUSD
-        self.usdTotalMinorUnits = pulledEvent.usdAmountMinorUnits
-        self.rateSnapshotDate = pulledEvent.rateSnapshotDate
+        self.expenseName = resolvedPayload?.name ?? "Expense"
+        self.totalMinorUnits = resolvedPayload?.totalMinorUnits ?? 0
+        self.currencyCode = resolvedPayload?.currencyCode ?? "USD"
+        self.exchangeRateToUSD = pulledEvent.exchangeRateToUSD ?? fallbackExpense?.exchangeRateToUSD
+        self.usdTotalMinorUnits = pulledEvent.usdAmountMinorUnits ?? fallbackExpense?.usdTotalMinorUnits
+        self.rateSnapshotDate = pulledEvent.rateSnapshotDate ?? fallbackExpense?.rateSnapshotDate
         self.eventCreatedAt = eventCreatedAt
         self.isPending = false
     }
@@ -553,9 +570,25 @@ struct PaymentAuditEntry: Codable, Hashable, Identifiable {
     let eventCreatedAt: Date
     var isPending: Bool
 
-    init?(groupID: GroupID, event: LedgerEventRequest, sequence: Int64? = nil, isPending: Bool) {
-        guard event.entityType == "payment",
-              let payload = event.paymentPayload() else { return nil }
+    init?(
+        groupID: GroupID,
+        event: LedgerEventRequest,
+        sequence: Int64? = nil,
+        isPending: Bool,
+        fallbackPayment: PaymentRecord? = nil
+    ) {
+        guard event.entityType == "payment" else { return nil }
+
+        let payload = event.paymentPayload()
+        let isVoidEvent = event.eventType == "payment.voided" || event.eventType == "payment.deleted"
+        guard isVoidEvent || payload != nil else { return nil }
+        let resolvedPayload = payload ?? fallbackPayment?.payload ?? PaymentPayload(
+            fromActorID: event.actorID,
+            toActorID: event.actorID,
+            currencyCode: "USD",
+            amountMinorUnits: 0,
+            occurredAt: event.eventCreatedAt
+        )
 
         self.id = event.eventID
         self.groupID = groupID
@@ -563,25 +596,38 @@ struct PaymentAuditEntry: Codable, Hashable, Identifiable {
         self.eventType = event.eventType
         self.actorID = event.actorID
         self.paymentID = PaymentID(rawValue: event.entityID)
-        self.fromActorID = payload.fromActorID
-        self.toActorID = payload.toActorID
-        self.amountMinorUnits = payload.amountMinorUnits
-        self.currencyCode = payload.currencyCode
-        self.exchangeRateToUSD = nil
-        self.usdAmountMinorUnits = nil
-        self.rateSnapshotDate = nil
+        self.fromActorID = resolvedPayload.fromActorID
+        self.toActorID = resolvedPayload.toActorID
+        self.amountMinorUnits = resolvedPayload.amountMinorUnits
+        self.currencyCode = resolvedPayload.currencyCode
+        self.exchangeRateToUSD = fallbackPayment?.exchangeRateToUSD
+        self.usdAmountMinorUnits = fallbackPayment?.usdAmountMinorUnits
+        self.rateSnapshotDate = fallbackPayment?.rateSnapshotDate
         self.eventCreatedAt = event.eventCreatedAt
         self.isPending = isPending
     }
 
-    init?(groupID: GroupID, pulledEvent: PulledLedgerEvent) {
+    init?(
+        groupID: GroupID,
+        pulledEvent: PulledLedgerEvent,
+        fallbackPayment: PaymentRecord? = nil
+    ) {
         guard pulledEvent.entityType == "payment",
               let eventType = pulledEvent.eventType,
               let actorID = pulledEvent.actorID,
               let paymentID = pulledEvent.entityID.map(PaymentID.init(rawValue:)),
-              let eventCreatedAt = pulledEvent.eventCreatedAt,
-              let payloadValue = pulledEvent.payload,
-              let payload = try? payloadValue.decode(PaymentPayload.self) else { return nil }
+              let eventCreatedAt = pulledEvent.eventCreatedAt else { return nil }
+
+        let payload = pulledEvent.payload.flatMap { try? $0.decode(PaymentPayload.self) }
+        let isVoidEvent = eventType == "payment.voided" || eventType == "payment.deleted"
+        guard isVoidEvent || payload != nil else { return nil }
+        let resolvedPayload = payload ?? fallbackPayment?.payload ?? PaymentPayload(
+            fromActorID: actorID,
+            toActorID: actorID,
+            currencyCode: "USD",
+            amountMinorUnits: 0,
+            occurredAt: eventCreatedAt
+        )
 
         self.id = pulledEvent.eventID
         self.groupID = groupID
@@ -589,13 +635,13 @@ struct PaymentAuditEntry: Codable, Hashable, Identifiable {
         self.eventType = eventType
         self.actorID = actorID
         self.paymentID = paymentID
-        self.fromActorID = payload.fromActorID
-        self.toActorID = payload.toActorID
-        self.amountMinorUnits = payload.amountMinorUnits
-        self.currencyCode = payload.currencyCode
-        self.exchangeRateToUSD = pulledEvent.exchangeRateToUSD
-        self.usdAmountMinorUnits = pulledEvent.usdAmountMinorUnits
-        self.rateSnapshotDate = pulledEvent.rateSnapshotDate
+        self.fromActorID = resolvedPayload.fromActorID
+        self.toActorID = resolvedPayload.toActorID
+        self.amountMinorUnits = resolvedPayload.amountMinorUnits
+        self.currencyCode = resolvedPayload.currencyCode
+        self.exchangeRateToUSD = pulledEvent.exchangeRateToUSD ?? fallbackPayment?.exchangeRateToUSD
+        self.usdAmountMinorUnits = pulledEvent.usdAmountMinorUnits ?? fallbackPayment?.usdAmountMinorUnits
+        self.rateSnapshotDate = pulledEvent.rateSnapshotDate ?? fallbackPayment?.rateSnapshotDate
         self.eventCreatedAt = eventCreatedAt
         self.isPending = false
     }
@@ -1140,6 +1186,25 @@ final class SplitStore {
         }
     }
 
+    func voidExpense(id expenseID: ExpenseID) async {
+        do {
+            guard let expense = expense(id: expenseID) else { throw SplitStoreError.groupNotFound }
+            let event = try makeVoidEvent(
+                groupID: expense.groupID,
+                entityType: "expense",
+                entityID: expense.id.rawValue,
+                eventType: "expense.voided",
+                baseSequence: expense.version
+            )
+
+            enqueue(event, groupID: expense.groupID)
+            applyLocalExpense(event: event, groupID: expense.groupID)
+            await syncGroup(id: expense.groupID)
+        } catch {
+            registrationStatus = .failed(error.localizedDescription)
+        }
+    }
+
     func createPayment(
         in groupID: GroupID,
         fromActorID: ActorID,
@@ -1196,6 +1261,25 @@ final class SplitStore {
         }
     }
 
+    func voidPayment(id paymentID: PaymentID) async {
+        do {
+            guard let payment = payment(id: paymentID) else { throw SplitStoreError.groupNotFound }
+            let event = try makeVoidEvent(
+                groupID: payment.groupID,
+                entityType: "payment",
+                entityID: payment.id.rawValue,
+                eventType: "payment.voided",
+                baseSequence: payment.version
+            )
+
+            enqueue(event, groupID: payment.groupID)
+            applyLocalPayment(event: event, groupID: payment.groupID)
+            await syncGroup(id: payment.groupID)
+        } catch {
+            registrationStatus = .failed(error.localizedDescription)
+        }
+    }
+
     func syncGroup(id groupID: GroupID) async {
         guard !syncingGroupIDs.contains(groupID) else { return }
         syncingGroupIDs.insert(groupID)
@@ -1204,10 +1288,10 @@ final class SplitStore {
         do {
             try await postPendingOperations(for: groupID)
             try await fetchGroups()
-            try await pullRemoteEvents(for: groupID)
-            try await refreshAuditEvents(for: groupID)
             try await refreshExpenses(for: groupID)
             try await refreshPayments(for: groupID)
+            try await pullRemoteEvents(for: groupID)
+            try await refreshAuditEvents(for: groupID)
             try await refreshBalances(for: groupID)
             groupSyncStates[groupID] = GroupSyncState(lastSuccessfulSyncAt: Date())
             persist()
@@ -1290,10 +1374,20 @@ final class SplitStore {
             }
 
             for event in response.events {
-                if let auditEntry = ExpenseAuditEntry(groupID: groupID, pulledEvent: event) {
+                let expenseID = event.entityID.map(ExpenseID.init(rawValue:))
+                let paymentID = event.entityID.map(PaymentID.init(rawValue:))
+                if let auditEntry = ExpenseAuditEntry(
+                    groupID: groupID,
+                    pulledEvent: event,
+                    fallbackExpense: expenseID.flatMap { expenseID in expenses.first { $0.id == expenseID } }
+                ) {
                     upsertAuditEntry(auditEntry)
                 }
-                if let paymentAuditEntry = PaymentAuditEntry(groupID: groupID, pulledEvent: event) {
+                if let paymentAuditEntry = PaymentAuditEntry(
+                    groupID: groupID,
+                    pulledEvent: event,
+                    fallbackPayment: paymentID.flatMap { paymentID in payments.first { $0.id == paymentID } }
+                ) {
                     upsertPaymentAuditEntry(paymentAuditEntry)
                 }
             }
@@ -1318,8 +1412,22 @@ final class SplitStore {
 
         while true {
             let response = try await apiClient.fetchGroupEvents(groupID: groupID, after: cursor)
-            let entries = response.events.compactMap { ExpenseAuditEntry(groupID: groupID, pulledEvent: $0) }
-            let paymentEntries = response.events.compactMap { PaymentAuditEntry(groupID: groupID, pulledEvent: $0) }
+            let entries = response.events.compactMap { event in
+                let expenseID = event.entityID.map(ExpenseID.init(rawValue:))
+                return ExpenseAuditEntry(
+                    groupID: groupID,
+                    pulledEvent: event,
+                    fallbackExpense: expenseID.flatMap { expenseID in expenses.first { $0.id == expenseID } }
+                )
+            }
+            let paymentEntries = response.events.compactMap { event in
+                let paymentID = event.entityID.map(PaymentID.init(rawValue:))
+                return PaymentAuditEntry(
+                    groupID: groupID,
+                    pulledEvent: event,
+                    fallbackPayment: paymentID.flatMap { paymentID in payments.first { $0.id == paymentID } }
+                )
+            }
             refreshedEntries.append(contentsOf: entries)
             refreshedPaymentEntries.append(contentsOf: paymentEntries)
 
@@ -1460,6 +1568,30 @@ final class SplitStore {
         )
     }
 
+    private func makeVoidEvent(
+        groupID: GroupID,
+        entityType: String,
+        entityID: String,
+        eventType: String,
+        baseSequence: Int64
+    ) throws -> LedgerEventRequest {
+        guard let group = groups.first(where: { $0.id == groupID }) else {
+            throw SplitStoreError.groupNotFound
+        }
+
+        return LedgerEventRequest(
+            eventID: .generate(),
+            entityType: entityType,
+            entityID: entityID,
+            eventType: eventType,
+            actorID: group.localActorID,
+            eventCreatedAt: Date(),
+            clientSequence: allocateClientSequence(),
+            baseSequence: baseSequence,
+            payload: .object([:])
+        )
+    }
+
     private func makeGroupNameEvent(groupID: GroupID, name: String, baseSequence: Int64) throws -> LedgerEventRequest {
         guard let group = groups.first(where: { $0.id == groupID }) else {
             throw SplitStoreError.groupNotFound
@@ -1510,10 +1642,22 @@ final class SplitStore {
 
     private func enqueue(_ event: LedgerEventRequest, groupID: GroupID) {
         pendingOperations.append(PendingSyncOperation(groupID: groupID, event: event))
-        if let auditEntry = ExpenseAuditEntry(groupID: groupID, event: event, isPending: true) {
+        let expenseID = event.entityType == "expense" ? ExpenseID(rawValue: event.entityID) : nil
+        let paymentID = event.entityType == "payment" ? PaymentID(rawValue: event.entityID) : nil
+        if let auditEntry = ExpenseAuditEntry(
+            groupID: groupID,
+            event: event,
+            isPending: true,
+            fallbackExpense: expenseID.flatMap { expenseID in expenses.first { $0.id == expenseID } }
+        ) {
             upsertAuditEntry(auditEntry)
         }
-        if let paymentAuditEntry = PaymentAuditEntry(groupID: groupID, event: event, isPending: true) {
+        if let paymentAuditEntry = PaymentAuditEntry(
+            groupID: groupID,
+            event: event,
+            isPending: true,
+            fallbackPayment: paymentID.flatMap { paymentID in payments.first { $0.id == paymentID } }
+        ) {
             upsertPaymentAuditEntry(paymentAuditEntry)
         }
         persist()
@@ -1587,10 +1731,19 @@ final class SplitStore {
     }
 
     private func applyLocalExpense(event: LedgerEventRequest, groupID: GroupID) {
-        guard let payload = event.expensePayload(),
-              let eventType = ExpenseEventType(rawValue: event.eventType) else { return }
+        guard let eventType = ExpenseEventType(rawValue: event.eventType) else { return }
 
         let expenseID = ExpenseID(rawValue: event.entityID)
+        if eventType == .voided || eventType == .deleted {
+            guard let index = expenses.firstIndex(where: { $0.id == expenseID }) else { return }
+            expenses[index].updatedAt = event.eventCreatedAt
+            expenses[index].version = max(expenses[index].version, event.baseSequence)
+            expenses[index].voidedAt = event.eventCreatedAt
+            persist()
+            return
+        }
+
+        guard let payload = event.expensePayload() else { return }
         let now = Date()
         let existingCreatedAt = expenses.first(where: { $0.id == expenseID })?.createdAt ?? now
         let expense = ExpenseRecord(
@@ -1616,9 +1769,17 @@ final class SplitStore {
     }
 
     private func applyLocalPayment(event: LedgerEventRequest, groupID: GroupID) {
-        guard let payload = event.paymentPayload() else { return }
-
         let paymentID = PaymentID(rawValue: event.entityID)
+        if event.eventType == "payment.voided" || event.eventType == "payment.deleted" {
+            guard let index = payments.firstIndex(where: { $0.id == paymentID }) else { return }
+            payments[index].updatedAt = event.eventCreatedAt
+            payments[index].version = max(payments[index].version, event.baseSequence)
+            payments[index].voidedAt = event.eventCreatedAt
+            persist()
+            return
+        }
+
+        guard let payload = event.paymentPayload() else { return }
         let now = Date()
         let existingCreatedAt = payments.first(where: { $0.id == paymentID })?.createdAt ?? now
         let payment = PaymentRecord(
@@ -1629,7 +1790,7 @@ final class SplitStore {
             createdAt: existingCreatedAt,
             updatedAt: now,
             version: event.baseSequence,
-            voidedAt: event.eventType == "payment.voided" ? event.eventCreatedAt : nil
+            voidedAt: event.eventType == "payment.voided" || event.eventType == "payment.deleted" ? event.eventCreatedAt : nil
         )
         upsertPayment(payment)
         persist()
@@ -1660,10 +1821,20 @@ final class SplitStore {
 
     private func applyCanonicalState(_ response: PostEventResponse, for event: LedgerEventRequest, groupID: GroupID) {
         if let pulledEvent = response.event {
-            if let auditEntry = ExpenseAuditEntry(groupID: groupID, pulledEvent: pulledEvent) {
+            let expenseID = pulledEvent.entityID.map(ExpenseID.init(rawValue:))
+            let paymentID = pulledEvent.entityID.map(PaymentID.init(rawValue:))
+            if let auditEntry = ExpenseAuditEntry(
+                groupID: groupID,
+                pulledEvent: pulledEvent,
+                fallbackExpense: expenseID.flatMap { expenseID in expenses.first { $0.id == expenseID } }
+            ) {
                 upsertAuditEntry(auditEntry)
             }
-            if let paymentAuditEntry = PaymentAuditEntry(groupID: groupID, pulledEvent: pulledEvent) {
+            if let paymentAuditEntry = PaymentAuditEntry(
+                groupID: groupID,
+                pulledEvent: pulledEvent,
+                fallbackPayment: paymentID.flatMap { paymentID in payments.first { $0.id == paymentID } }
+            ) {
                 upsertPaymentAuditEntry(paymentAuditEntry)
             }
         }

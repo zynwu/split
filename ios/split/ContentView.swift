@@ -256,7 +256,6 @@ private struct GroupDetailView: View {
     @State private var isGroupActionMenuExpanded = false
     @State private var activeGroupDetailSheet: GroupDetailSheet?
     @State private var isShowingEditGroupName = false
-    @State private var activeActorNameEdit: ActorNameEdit?
     @State private var selectedTab: GroupDetailTab = .balances
 
     private var group: ExpenseGroup? {
@@ -378,13 +377,6 @@ private struct GroupDetailView: View {
                 .presentationDetents([.medium])
             }
         }
-        .sheet(item: $activeActorNameEdit) { edit in
-            EditActorDisplayNameSheet(actor: edit.actor) { displayName in
-                let splitStore = store
-                await splitStore.updateActorDisplayName(in: edit.groupID, actorID: edit.actor.id, to: displayName)
-            }
-            .presentationDetents([.medium])
-        }
 
     }
 
@@ -420,12 +412,7 @@ private struct GroupDetailView: View {
                             NavigationLink {
                                 MemberDetailView(store: store, groupID: group.id, actorID: actor.id)
                             } label: {
-                                MemberRow(
-                                    actor: actor,
-                                    editName: actor.id == group.localActorID ? {
-                                        activeActorNameEdit = ActorNameEdit(groupID: group.id, actor: actor)
-                                    } : nil
-                                )
+                                MemberRow(actor: actor)
                             }
                         }
                     }
@@ -567,15 +554,6 @@ private struct GroupDetailActionButton: View {
     }
 }
 
-private struct ActorNameEdit: Identifiable {
-    let groupID: GroupID
-    let actor: Actor
-
-    var id: String {
-        "\(groupID.rawValue)-\(actor.id.rawValue)"
-    }
-}
-
 private enum GroupDetailTab: String, CaseIterable, Identifiable {
     case balances = "Balances"
     case activity = "Activity"
@@ -662,12 +640,6 @@ private struct BalanceRow: View {
 
 private struct MemberRow: View {
     let actor: Actor
-    let editName: (() -> Void)?
-
-    init(actor: Actor, editName: (() -> Void)? = nil) {
-        self.actor = actor
-        self.editName = editName
-    }
 
     var body: some View {
         HStack {
@@ -687,14 +659,6 @@ private struct MemberRow: View {
                     .foregroundStyle(.secondary)
             }
 
-            if let editName {
-                Button(action: editName) {
-                    Image(systemName: "pencil")
-                }
-                .buttonStyle(.borderless)
-                .accessibilityLabel("Edit display name")
-            }
-
         }
     }
 }
@@ -704,6 +668,7 @@ private struct MemberDetailView: View {
     let groupID: GroupID
     let actorID: ActorID
     @State private var isConfirmingCommandeering = false
+    @State private var isShowingEditName = false
 
     private var group: ExpenseGroup? {
         store.groups.first { $0.id == groupID }
@@ -711,6 +676,11 @@ private struct MemberDetailView: View {
 
     private var actor: Actor? {
         store.actor(for: actorID)
+    }
+
+    private var isLocalActor: Bool {
+        guard let group else { return false }
+        return group.localActorID == actorID
     }
 
     private var canCommandeer: Bool {
@@ -729,6 +699,16 @@ private struct MemberDetailView: View {
                     }
                 }
 
+                if isLocalActor {
+                    Section {
+                        Button {
+                            isShowingEditName = true
+                        } label: {
+                            Label("Edit Name", systemImage: "pencil")
+                        }
+                    }
+                }
+
                 if canCommandeer {
                     Section {
                         Button(role: .destructive) {
@@ -744,6 +724,14 @@ private struct MemberDetailView: View {
             }
         }
         .navigationTitle(actor?.displayName ?? "Member")
+        .sheet(isPresented: $isShowingEditName) {
+            if let actor {
+                EditActorDisplayNameSheet(actor: actor) { displayName in
+                    await store.updateActorDisplayName(in: groupID, actorID: actor.id, to: displayName)
+                }
+                .presentationDetents([.medium])
+            }
+        }
         .alert("Use \(actor?.displayName ?? "this actor")?", isPresented: $isConfirmingCommandeering) {
             Button("Use This Actor", role: .destructive) {
                 Task {

@@ -435,16 +435,35 @@ private struct GroupDetailView: View {
 
                     if let balances = store.balances(for: groupID), !balances.currencyBalances.isEmpty {
                         ForEach(balances.currencyBalances) { currencyBalance in
-                            ForEach(currencyBalance.memberBalances) { memberBalance in
-                                BalanceRow(
-                                    memberBalance: memberBalance,
+                            ForEach(currencyBalance.suggestedTransfers.filter { transfer in
+                                transfer.fromActorID == balances.currentActorID || transfer.toActorID == balances.currentActorID
+                            }) { transfer in
+                                SuggestedTransferRow(
+                                    transfer: transfer,
+                                    currentActorID: balances.currentActorID,
                                     currencyCode: currencyBalance.currencyCode,
-                                    actor: store.actor(for: memberBalance.actorID)
+                                    fromName: balanceActorName(
+                                        transfer.fromActorID,
+                                        currencyBalance: currencyBalance
+                                    ),
+                                    toName: balanceActorName(
+                                        transfer.toActorID,
+                                        currencyBalance: currencyBalance
+                                    )
                                 )
                             }
                         }
+
+                        if !balances.currencyBalances.contains(where: { currencyBalance in
+                            currencyBalance.suggestedTransfers.contains { transfer in
+                                transfer.fromActorID == balances.currentActorID || transfer.toActorID == balances.currentActorID
+                            }
+                        }) {
+                            Text("You're settled up")
+                                .foregroundStyle(.secondary)
+                        }
                     } else {
-                        Text("No balances yet")
+                        Text("No transfers yet")
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -468,6 +487,19 @@ private struct GroupDetailView: View {
         .refreshable {
             await store.syncGroup(id: groupID)
         }
+    }
+
+    private func balanceActorName(_ actorID: ActorID, currencyBalance: CurrencyBalance) -> String {
+        if let displayName = store.actor(for: actorID)?.displayName, !displayName.isEmpty {
+            return displayName
+        }
+
+        if let displayName = currencyBalance.memberBalances.first(where: { $0.actorID == actorID })?.displayName,
+           !displayName.isEmpty {
+            return displayName
+        }
+
+        return actorID.rawValue
     }
 
     private func showRecordPaymentSheet() {
@@ -673,39 +705,39 @@ private struct GroupDetailTabSlider: View {
     }
 }
 
-private struct BalanceRow: View {
-    let memberBalance: BalanceMember
+private struct SuggestedTransferRow: View {
+    let transfer: SuggestedTransfer
+    let currentActorID: ActorID
     let currencyCode: String
-    let actor: Actor?
+    let fromName: String
+    let toName: String
 
-    private var name: String {
-        actor?.displayName.isEmpty == false ? actor?.displayName ?? memberBalance.displayName : memberBalance.displayName
+    private var isOutgoing: Bool {
+        transfer.fromActorID == currentActorID
     }
 
-    private var status: String {
-        if memberBalance.netMinorUnits > 0 {
-            "Gets back"
-        } else if memberBalance.netMinorUnits < 0 {
-            "Owes"
-        } else {
-            "Settled"
-        }
+    private var counterpartyName: String {
+        isOutgoing ? toName : fromName
+    }
+
+    private var title: String {
+        isOutgoing ? "You owe \(counterpartyName)" : "\(counterpartyName) owes you"
     }
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(name.isEmpty ? memberBalance.actorID.rawValue : name)
-                Text(status)
+                Text(title)
+                Text(isOutgoing ? "Suggested payment" : "Suggested reimbursement")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             Spacer()
 
-            Text(MoneyText.display(memberBalance.netMinorUnits, currencyCode: currencyCode))
+            Text(MoneyText.display(transfer.amountMinorUnits, currencyCode: currencyCode))
                 .font(.body.monospacedDigit())
-                .foregroundStyle(memberBalance.netMinorUnits < 0 ? .red : .primary)
+                .foregroundStyle(isOutgoing ? .red : .green)
         }
     }
 }

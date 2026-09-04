@@ -725,6 +725,29 @@ final class SplitStore {
         }
     }
 
+    func commandeerActor(in groupID: GroupID, targetActorID: ActorID) async {
+        guard let group = groups.first(where: { $0.id == groupID }),
+              group.actorIDs.contains(targetActorID),
+              group.localActorID != targetActorID else { return }
+
+        do {
+            let response = try await apiClient.commandeerActor(
+                groupID: groupID,
+                targetActorID: targetActorID,
+                eventID: .generate(),
+                eventCreatedAt: Date(),
+                clientSequence: allocateClientSequence()
+            )
+
+            if let targetActor = response.targetActor {
+                upsertActor(targetActor, isLocal: true)
+            }
+            await syncGroup(id: groupID)
+        } catch {
+            registrationStatus = .failed(error.localizedDescription)
+        }
+    }
+
     func removeGroup(id: GroupID) {
         groups.removeAll { $0.id == id }
         expenses.removeAll { $0.groupID == id }

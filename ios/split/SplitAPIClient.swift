@@ -837,6 +837,41 @@ struct ExpenseReplacementRequest: Encodable {
     }
 }
 
+struct CommandeerActorRequest: Encodable {
+    let eventID: EventID
+    let eventCreatedAt: Date
+    let clientSequence: Int64
+
+    private enum CodingKeys: String, CodingKey {
+        case event_uuid
+        case event_created_at
+        case client_sequence
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(eventID.rawValue, forKey: .event_uuid)
+        try container.encode(eventCreatedAt, forKey: .event_created_at)
+        try container.encode(clientSequence, forKey: .client_sequence)
+    }
+}
+
+struct CommandeerActorResponse: Decodable {
+    let replayed: Bool?
+    let targetActor: ServerActor?
+
+    private enum CodingKeys: String, CodingKey {
+        case replayed
+        case target_actor
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.replayed = try container.decodeIfPresent(Bool.self, forKey: .replayed)
+        self.targetActor = try? container.decodeIfPresent(ServerActor.self, forKey: .target_actor)
+    }
+}
+
 struct PostEventResponse: Decodable {
     let sequence: Int64?
     let applied: Bool?
@@ -1062,6 +1097,26 @@ struct SplitAPIClient {
         var request = try authorizedRequest(path: "/groups/\(groupID.rawValue)/expenses/\(expenseID.rawValue)", method: "PUT")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(ExpenseReplacementRequest(event: event))
+        return try await sendWithRetry(request)
+    }
+
+    func commandeerActor(
+        groupID: GroupID,
+        targetActorID: ActorID,
+        eventID: EventID,
+        eventCreatedAt: Date,
+        clientSequence: Int64
+    ) async throws -> CommandeerActorResponse {
+        var request = try authorizedRequest(
+            path: "/groups/\(groupID.rawValue)/actors/\(targetActorID.rawValue)/commandeer",
+            method: "POST"
+        )
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(CommandeerActorRequest(
+            eventID: eventID,
+            eventCreatedAt: eventCreatedAt,
+            clientSequence: clientSequence
+        ))
         return try await sendWithRetry(request)
     }
 

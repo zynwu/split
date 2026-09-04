@@ -385,6 +385,7 @@ private struct GroupDetailView: View {
             }
             .presentationDetents([.medium])
         }
+
     }
 
     private var balancesList: some View {
@@ -416,12 +417,16 @@ private struct GroupDetailView: View {
                 Section("Members") {
                     ForEach(group.actorIDs, id: \.self) { actorID in
                         if let actor = store.actor(for: actorID) {
-                            MemberRow(
-                                actor: actor,
-                                editName: actor.id == group.localActorID ? {
-                                    activeActorNameEdit = ActorNameEdit(groupID: group.id, actor: actor)
-                                } : nil
-                            )
+                            NavigationLink {
+                                MemberDetailView(store: store, groupID: group.id, actorID: actor.id)
+                            } label: {
+                                MemberRow(
+                                    actor: actor,
+                                    editName: actor.id == group.localActorID ? {
+                                        activeActorNameEdit = ActorNameEdit(groupID: group.id, actor: actor)
+                                    } : nil
+                                )
+                            }
                         }
                     }
                 }
@@ -689,6 +694,65 @@ private struct MemberRow: View {
                 .buttonStyle(.borderless)
                 .accessibilityLabel("Edit display name")
             }
+
+        }
+    }
+}
+
+private struct MemberDetailView: View {
+    @Bindable var store: SplitStore
+    let groupID: GroupID
+    let actorID: ActorID
+    @State private var isConfirmingCommandeering = false
+
+    private var group: ExpenseGroup? {
+        store.groups.first { $0.id == groupID }
+    }
+
+    private var actor: Actor? {
+        store.actor(for: actorID)
+    }
+
+    private var canCommandeer: Bool {
+        guard let group else { return false }
+        return group.localActorID != actorID
+    }
+
+    var body: some View {
+        List {
+            if let actor {
+                Section("Member") {
+                    LabeledContent("Name", value: actor.displayName)
+                    LabeledContent("Actor ID", value: actor.id.rawValue)
+                    if actor.isLocal {
+                        LabeledContent("Device", value: "This device")
+                    }
+                }
+
+                if canCommandeer {
+                    Section {
+                        Button(role: .destructive) {
+                            isConfirmingCommandeering = true
+                        } label: {
+                            Label("Use This Actor", systemImage: "person.crop.circle.badge.checkmark")
+                        }
+                    }
+                }
+            } else {
+                Text("Member not found")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle(actor?.displayName ?? "Member")
+        .alert("Use \(actor?.displayName ?? "this actor")?", isPresented: $isConfirmingCommandeering) {
+            Button("Use This Actor", role: .destructive) {
+                Task {
+                    await store.commandeerActor(in: groupID, targetActorID: actorID)
+                }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This merges your current actor into this member for the group.")
         }
     }
 }

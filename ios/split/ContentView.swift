@@ -1394,9 +1394,34 @@ private struct ExpenseDetailView: View {
         return group.actorIDs.compactMap { store.actor(for: $0) }
     }
 
+    private var isForeignCurrency: Bool {
+        guard let expense else { return false }
+        return expense.payload.currencyCode.uppercased() != "USD"
+    }
+
+    private var shouldShowUSDSplits: Bool {
+        guard let expense else { return false }
+        return isForeignCurrency && expense.payload.splitMethod == .manual
+    }
+
     private var includedSplits: [ExpenseSplit] {
         guard let expense else { return [] }
-        return expense.payload.splits.filter { ($0.amountMinorUnits ?? 0) != 0 }
+        return expense.payload.splits.filter { split in
+            (split.amountMinorUnits ?? 0) != 0 || (shouldShowUSDSplits && (split.usdAmountMinorUnits ?? 0) != 0)
+        }
+    }
+
+    private var formattedExchangeRate: String? {
+        guard let expense,
+              isForeignCurrency,
+              let exchangeRate = expense.exchangeRateToUSD,
+              let decimal = Decimal(string: exchangeRate) else { return nil }
+
+        let formatter = NumberFormatter()
+        formatter.minimumFractionDigits = 3
+        formatter.maximumFractionDigits = 3
+        formatter.numberStyle = .decimal
+        return formatter.string(from: NSDecimalNumber(decimal: decimal))
     }
 
     var body: some View {
@@ -1405,6 +1430,14 @@ private struct ExpenseDetailView: View {
                 Section("Expense") {
                     LabeledContent("Name", value: expense.payload.name)
                     LabeledContent("Total", value: MoneyText.display(expense.payload.totalMinorUnits, currencyCode: expense.payload.currencyCode))
+                    if isForeignCurrency {
+                        if let formattedExchangeRate {
+                            LabeledContent("USD Rate", value: formattedExchangeRate)
+                        }
+                        if let usdTotalMinorUnits = expense.usdTotalMinorUnits {
+                            LabeledContent("USD Total", value: MoneyText.display(usdTotalMinorUnits, currencyCode: "USD"))
+                        }
+                    }
                     LabeledContent("Paid by", value: store.actor(for: expense.payload.payerActorID)?.displayName ?? expense.payload.payerActorID.rawValue)
                 }
 
@@ -1417,8 +1450,20 @@ private struct ExpenseDetailView: View {
                             HStack {
                                 Text(store.actor(for: split.actorID)?.displayName ?? split.actorID.rawValue)
                                 Spacer()
-                                Text(MoneyText.display(split.amountMinorUnits ?? 0, currencyCode: expense.payload.currencyCode))
-                                    .font(.body.monospacedDigit())
+                                VStack(alignment: .trailing, spacing: 4) {
+                                    if shouldShowUSDSplits, let usdAmountMinorUnits = split.usdAmountMinorUnits {
+                                        Text(MoneyText.display(usdAmountMinorUnits, currencyCode: "USD"))
+                                            .font(.body.monospacedDigit())
+                                        if let amountMinorUnits = split.amountMinorUnits {
+                                            Text(MoneyText.display(amountMinorUnits, currencyCode: expense.payload.currencyCode))
+                                                .font(.caption.monospacedDigit())
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    } else {
+                                        Text(MoneyText.display(split.amountMinorUnits ?? 0, currencyCode: expense.payload.currencyCode))
+                                            .font(.body.monospacedDigit())
+                                    }
+                                }
                             }
                         }
                     }

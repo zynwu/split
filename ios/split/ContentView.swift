@@ -279,6 +279,45 @@ private struct GroupDetailView: View {
         store.auditEvents(for: groupID)
     }
 
+    private var balanceNotice: BalanceNotice? {
+        guard group != nil else { return nil }
+
+        let syncState = store.syncState(for: groupID)
+        let pendingCount = store.pendingOperationCount(for: groupID)
+        let hasBalanceSnapshot = store.balances(for: groupID) != nil
+
+        if pendingCount > 0 {
+            let changeWord = pendingCount == 1 ? "change" : "changes"
+            let message = syncState.lastSyncError != nil
+                ? "Balances may be out of date. Server sync did not complete; \(pendingCount) offline \(changeWord) are waiting to sync."
+                : "Balances may be out of date. \(pendingCount) offline \(changeWord) are waiting to sync."
+            return BalanceNotice(message: message, lastSyncedAt: syncState.lastSuccessfulSyncAt)
+        }
+
+        if syncState.lastSyncError != nil {
+            return BalanceNotice(
+                message: "Balances may be out of date. Server sync did not complete.",
+                lastSyncedAt: syncState.lastSuccessfulSyncAt
+            )
+        }
+
+        if !hasBalanceSnapshot {
+            return BalanceNotice(
+                message: "Balances are unavailable offline. Reconnect to calculate them.",
+                lastSyncedAt: nil
+            )
+        }
+
+        if syncState.lastSuccessfulSyncAt == nil {
+            return BalanceNotice(
+                message: "Balances may be out of date. Reconnect to verify them.",
+                lastSyncedAt: nil
+            )
+        }
+
+        return nil
+    }
+
     private var activityRows: [GroupActivityRow] {
         let expenseRows = groupAuditEvents.map(GroupActivityRow.expense)
         let paymentRows = groupPaymentAuditEvents.map(GroupActivityRow.payment)
@@ -389,7 +428,11 @@ private struct GroupDetailView: View {
                         .fontWeight(.semibold)
                 }
 
-                Section("Balances") {
+                Section(balanceNotice == nil ? "Balances" : "Balances*") {
+                    if let balanceNotice {
+                        BalanceSyncNoticeView(notice: balanceNotice)
+                    }
+
                     if let balances = store.balances(for: groupID), !balances.currencyBalances.isEmpty {
                         ForEach(balances.currencyBalances) { currencyBalance in
                             ForEach(currencyBalance.memberBalances) { memberBalance in
@@ -475,6 +518,35 @@ private struct GroupDetailView: View {
         .refreshable {
             await store.syncGroup(id: groupID)
         }
+    }
+}
+
+private struct BalanceNotice {
+    let message: String
+    let lastSyncedAt: Date?
+}
+
+private struct BalanceSyncNoticeView: View {
+    let notice: BalanceNotice
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(notice.message)
+
+                if let lastSyncedAt = notice.lastSyncedAt {
+                    Text("Last synced \(lastSyncedAt.formatted(date: .abbreviated, time: .shortened)). Pull to refresh after reconnecting.")
+                } else {
+                    Text("Pull to refresh after reconnecting.")
+                }
+            }
+        }
+        .font(.footnote)
+        .foregroundStyle(.orange)
+        .padding(.vertical, 4)
     }
 }
 

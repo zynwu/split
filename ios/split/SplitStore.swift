@@ -619,6 +619,16 @@ struct PaymentAuditEntry: Codable, Hashable, Identifiable {
     }
 }
 
+struct GroupSyncState: Codable, Hashable {
+    var lastSuccessfulSyncAt: Date?
+    var lastSyncError: String?
+
+    init(lastSuccessfulSyncAt: Date? = nil, lastSyncError: String? = nil) {
+        self.lastSuccessfulSyncAt = lastSuccessfulSyncAt
+        self.lastSyncError = lastSyncError
+    }
+}
+
 struct SplitSnapshot: Codable {
     var migratedDeviceID: DeviceID?
     var displayName: String
@@ -630,6 +640,7 @@ struct SplitSnapshot: Codable {
     var auditEvents: [ExpenseAuditEntry]
     var paymentAuditEvents: [PaymentAuditEntry]
     var groupBalances: [GroupID: GroupBalancesResponse]
+    var groupSyncStates: [GroupID: GroupSyncState]
     var nextClientSequence: Int64
 
     private enum CodingKeys: String, CodingKey {
@@ -644,6 +655,7 @@ struct SplitSnapshot: Codable {
         case auditEvents
         case paymentAuditEvents
         case groupBalances
+        case groupSyncStates
         case nextClientSequence
     }
 
@@ -657,6 +669,7 @@ struct SplitSnapshot: Codable {
         auditEvents: [ExpenseAuditEntry],
         paymentAuditEvents: [PaymentAuditEntry],
         groupBalances: [GroupID: GroupBalancesResponse],
+        groupSyncStates: [GroupID: GroupSyncState],
         nextClientSequence: Int64
     ) {
         self.migratedDeviceID = nil
@@ -669,6 +682,7 @@ struct SplitSnapshot: Codable {
         self.auditEvents = auditEvents
         self.paymentAuditEvents = paymentAuditEvents
         self.groupBalances = groupBalances
+        self.groupSyncStates = groupSyncStates
         self.nextClientSequence = nextClientSequence
     }
 
@@ -695,6 +709,7 @@ struct SplitSnapshot: Codable {
         self.paymentAuditEvents = try container.decodeIfPresent([PaymentAuditEntry].self, forKey: .paymentAuditEvents)
             ?? self.pendingOperations.compactMap { PaymentAuditEntry(groupID: $0.groupID, event: $0.event, isPending: true) }
         self.groupBalances = try container.decodeIfPresent([GroupID: GroupBalancesResponse].self, forKey: .groupBalances) ?? [:]
+        self.groupSyncStates = try container.decodeIfPresent([GroupID: GroupSyncState].self, forKey: .groupSyncStates) ?? [:]
         self.nextClientSequence = try container.decodeIfPresent(Int64.self, forKey: .nextClientSequence) ?? 0
 
         if let displayName = try container.decodeIfPresent(String.self, forKey: .displayName) {
@@ -717,6 +732,7 @@ struct SplitSnapshot: Codable {
         try container.encode(auditEvents, forKey: .auditEvents)
         try container.encode(paymentAuditEvents, forKey: .paymentAuditEvents)
         try container.encode(groupBalances, forKey: .groupBalances)
+        try container.encode(groupSyncStates, forKey: .groupSyncStates)
         try container.encode(nextClientSequence, forKey: .nextClientSequence)
     }
 }
@@ -771,6 +787,7 @@ final class SplitStore {
     private(set) var auditEvents: [ExpenseAuditEntry]
     private(set) var paymentAuditEvents: [PaymentAuditEntry]
     private(set) var groupBalances: [GroupID: GroupBalancesResponse]
+    private(set) var groupSyncStates: [GroupID: GroupSyncState]
     private(set) var registrationStatus: RegistrationStatus = .notStarted
 
     @ObservationIgnored private let storageURL: URL
@@ -817,6 +834,7 @@ final class SplitStore {
             self.auditEvents = snapshot.auditEvents
             self.paymentAuditEvents = snapshot.paymentAuditEvents
             self.groupBalances = snapshot.groupBalances
+            self.groupSyncStates = snapshot.groupSyncStates
             self.nextClientSequence = snapshot.nextClientSequence
             self.auditEvents = deduplicatedAuditEvents(auditEvents)
             ensureLocalActorsExist()
@@ -831,6 +849,7 @@ final class SplitStore {
             self.auditEvents = []
             self.paymentAuditEvents = []
             self.groupBalances = [:]
+            self.groupSyncStates = [:]
             self.nextClientSequence = 0
             persist()
         }
@@ -968,6 +987,7 @@ final class SplitStore {
         auditEvents.removeAll { $0.groupID == id }
         paymentAuditEvents.removeAll { $0.groupID == id }
         groupBalances[id] = nil
+        groupSyncStates[id] = nil
         pruneUnusedActors()
         persist()
     }
@@ -1004,6 +1024,14 @@ final class SplitStore {
 
     func balances(for groupID: GroupID) -> GroupBalancesResponse? {
         groupBalances[groupID]
+    }
+
+    func syncState(for groupID: GroupID) -> GroupSyncState {
+        groupSyncStates[groupID] ?? GroupSyncState()
+    }
+
+    func pendingOperationCount(for groupID: GroupID) -> Int {
+        pendingOperations.count { $0.groupID == groupID }
     }
 
     func paymentAuditEvents(for groupID: GroupID) -> [PaymentAuditEntry] {
@@ -1181,9 +1209,13 @@ final class SplitStore {
             try await refreshExpenses(for: groupID)
             try await refreshPayments(for: groupID)
             try await refreshBalances(for: groupID)
+            groupSyncStates[groupID] = GroupSyncState(lastSuccessfulSyncAt: Date())
             persist()
         } catch {
             registrationStatus = .failed(error.localizedDescription)
+            var state = groupSyncStates[groupID] ?? GroupSyncState()
+            state.lastSyncError = error.localizedDescription
+            groupSyncStates[groupID] = state
             persist()
         }
     }
@@ -1846,6 +1878,7 @@ final class SplitStore {
                 auditEvents: auditEvents,
                 paymentAuditEvents: paymentAuditEvents,
                 groupBalances: groupBalances,
+                groupSyncStates: groupSyncStates,
                 nextClientSequence: nextClientSequence
             )
             let data = try encoder.encode(snapshot)

@@ -48,7 +48,7 @@ struct ContentView: View {
                     }
                 }
                 .refreshable {
-                    await store.refreshGroups()
+                    await store.syncAllGroups()
                 }
                 .navigationTitle("Split")
                 .navigationDestination(for: GroupID.self) { groupID in
@@ -580,6 +580,8 @@ private struct AuditEventRow: View {
             "Updated \(auditEvent.expenseName)"
         case .voided:
             "Voided \(auditEvent.expenseName)"
+        case .deleted:
+            "Deleted \(auditEvent.expenseName)"
         }
     }
 

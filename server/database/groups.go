@@ -76,7 +76,8 @@ func (database *Database) createGroupAttempt(ctx context.Context, name, displayN
 		INSERT INTO groups (uuid, name, join_code)
 		VALUES ($1, $2, $3)
 		ON CONFLICT (join_code) DO NOTHING
-		RETURNING uuid, name, creation_date, join_code, latest_event_sequence`
+		RETURNING uuid, name, creation_date, join_code, latest_event_sequence,
+			latest_metadata_event_sequence`
 
 	var group Group
 	err = tx.QueryRowContext(ctx, groupQuery, groupUUID.String(), name, joinCode).Scan(
@@ -85,6 +86,7 @@ func (database *Database) createGroupAttempt(ctx context.Context, name, displayN
 		&group.CreationDate,
 		&group.JoinCode,
 		&group.LatestEventSequence,
+		&group.LatestMetadataEventSequence,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return GroupMembership{}, true, nil
@@ -119,8 +121,10 @@ func (database *Database) ListGroupsForDevice(ctx context.Context, deviceID stri
 	const query = `
 		SELECT g.uuid, g.name, g.creation_date, g.join_code,
 			g.latest_event_sequence,
+			g.latest_metadata_event_sequence,
 			current_binding.actor_uuid,
-			a.actor_uuid, COALESCE(a.display_name, '')
+			a.actor_uuid, COALESCE(a.display_name, ''),
+			a.latest_metadata_event_sequence
 		FROM actor_device_bindings AS current_binding
 		JOIN groups AS g
 			ON g.uuid = current_binding.group_uuid
@@ -152,9 +156,11 @@ func (database *Database) ListGroupsForDevice(ctx context.Context, deviceID stri
 			&group.CreationDate,
 			&group.JoinCode,
 			&group.LatestEventSequence,
+			&group.LatestMetadataEventSequence,
 			&currentActorUUID,
 			&actor.ActorUUID,
 			&actor.DisplayName,
+			&actor.LatestMetadataEventSequence,
 		); err != nil {
 			return nil, fmt.Errorf("scan group membership: %w", err)
 		}
@@ -189,70 +195,6 @@ func NormalizeGroupName(value string) (string, error) {
 	return value, nil
 }
 
-// UpdateGroupName changes the name of a group for an active group member.
-func (database *Database) UpdateGroupName(ctx context.Context, groupUUID, deviceID, name string) (Group, error) {
-	groupUUID, err := normalizeUUID(groupUUID, "group_uuid")
-	if err != nil {
-		return Group{}, err
-	}
-	name, err = NormalizeGroupName(name)
-	if err != nil {
-		return Group{}, err
-	}
-
-	tx, err := database.db.BeginTx(ctx, nil)
-	if err != nil {
-		return Group{}, fmt.Errorf("begin group name update transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	var groupExists bool
-	if err := tx.QueryRowContext(ctx, `
-		SELECT EXISTS (
-			SELECT 1
-			FROM groups
-			WHERE uuid = $1
-		)`, groupUUID).Scan(&groupExists); err != nil {
-		return Group{}, fmt.Errorf("check group name update group: %w", err)
-	}
-	if !groupExists {
-		return Group{}, ErrGroupNotFound
-	}
-
-	member, err := activeGroupMembershipTx(ctx, tx, groupUUID, deviceID)
-	if err != nil {
-		return Group{}, fmt.Errorf("check group name update membership: %w", err)
-	}
-	if !member {
-		return Group{}, ErrGroupMembershipDenied
-	}
-
-	var group Group
-	err = tx.QueryRowContext(ctx, `
-		UPDATE groups
-		SET name = $2
-		WHERE uuid = $1
-		RETURNING uuid, name, creation_date, join_code, latest_event_sequence`, groupUUID, name).Scan(
-		&group.UUID,
-		&group.Name,
-		&group.CreationDate,
-		&group.JoinCode,
-		&group.LatestEventSequence,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return Group{}, ErrGroupNotFound
-	}
-	if err != nil {
-		return Group{}, fmt.Errorf("update group name: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return Group{}, fmt.Errorf("commit group name update: %w", err)
-	}
-
-	return group, nil
-}
-
 func (database *Database) JoinGroup(ctx context.Context, deviceID, joinCode, displayName string) (GroupMembership, error) {
 	displayName, err := NormalizeDisplayName(displayName)
 	if err != nil {
@@ -269,7 +211,8 @@ func (database *Database) JoinGroup(ctx context.Context, deviceID, joinCode, dis
 	// both create a new actor before seeing the other's binding.
 	var group Group
 	err = groupTransaction.QueryRowContext(ctx, `
-		SELECT uuid, name, creation_date, join_code, latest_event_sequence
+		SELECT uuid, name, creation_date, join_code, latest_event_sequence,
+			latest_metadata_event_sequence
 		FROM groups
 		WHERE join_code = $1
 		FOR UPDATE`, joinCode).Scan(
@@ -278,6 +221,7 @@ func (database *Database) JoinGroup(ctx context.Context, deviceID, joinCode, dis
 		&group.CreationDate,
 		&group.JoinCode,
 		&group.LatestEventSequence,
+		&group.LatestMetadataEventSequence,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return GroupMembership{}, ErrGroupNotFound

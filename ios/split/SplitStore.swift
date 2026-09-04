@@ -52,6 +52,47 @@ struct Actor: Codable, Hashable, Identifiable {
     var displayName: String
     var deviceID: DeviceID?
     let isLocal: Bool
+    var metadataVersion: Int64
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case displayName
+        case deviceID
+        case isLocal
+        case metadataVersion
+    }
+
+    init(
+        id: ActorID,
+        displayName: String,
+        deviceID: DeviceID?,
+        isLocal: Bool,
+        metadataVersion: Int64 = 0
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.deviceID = deviceID
+        self.isLocal = isLocal
+        self.metadataVersion = metadataVersion
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(ActorID.self, forKey: .id)
+        self.displayName = try container.decode(String.self, forKey: .displayName)
+        self.deviceID = try container.decodeIfPresent(DeviceID.self, forKey: .deviceID)
+        self.isLocal = try container.decode(Bool.self, forKey: .isLocal)
+        self.metadataVersion = try container.decodeIfPresent(Int64.self, forKey: .metadataVersion) ?? 0
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(displayName, forKey: .displayName)
+        try container.encodeIfPresent(deviceID, forKey: .deviceID)
+        try container.encode(isLocal, forKey: .isLocal)
+        try container.encode(metadataVersion, forKey: .metadataVersion)
+    }
 }
 
 struct ExpenseGroup: Codable, Hashable, Identifiable {
@@ -62,6 +103,7 @@ struct ExpenseGroup: Codable, Hashable, Identifiable {
     var actorIDs: [ActorID]
     var syncCursor: Int64
     var serverLatestEventSequence: Int64
+    var metadataVersion: Int64
     let createdAt: Date
 
     private enum CodingKeys: String, CodingKey {
@@ -72,6 +114,7 @@ struct ExpenseGroup: Codable, Hashable, Identifiable {
         case actorIDs
         case syncCursor
         case serverLatestEventSequence
+        case metadataVersion
         case createdAt
     }
 
@@ -83,6 +126,7 @@ struct ExpenseGroup: Codable, Hashable, Identifiable {
         actorIDs: [ActorID],
         syncCursor: Int64,
         serverLatestEventSequence: Int64,
+        metadataVersion: Int64 = 0,
         createdAt: Date
     ) {
         self.id = id
@@ -92,6 +136,7 @@ struct ExpenseGroup: Codable, Hashable, Identifiable {
         self.actorIDs = actorIDs
         self.syncCursor = syncCursor
         self.serverLatestEventSequence = serverLatestEventSequence
+        self.metadataVersion = metadataVersion
         self.createdAt = createdAt
     }
 
@@ -104,6 +149,7 @@ struct ExpenseGroup: Codable, Hashable, Identifiable {
         self.localActorID = try container.decodeIfPresent(ActorID.self, forKey: .localActorID) ?? actorIDs.first ?? .generate()
         self.syncCursor = try container.decodeIfPresent(Int64.self, forKey: .syncCursor) ?? 0
         self.serverLatestEventSequence = try container.decodeIfPresent(Int64.self, forKey: .serverLatestEventSequence) ?? syncCursor
+        self.metadataVersion = try container.decodeIfPresent(Int64.self, forKey: .metadataVersion) ?? 0
         self.createdAt = try container.decode(Date.self, forKey: .createdAt)
     }
 }
@@ -156,7 +202,14 @@ struct ExpenseRecord: Codable, Hashable, Identifiable {
     }
 }
 
-struct PendingExpenseEvent: Codable, Hashable, Identifiable {
+struct PendingSyncOperation: Codable, Hashable, Identifiable {
+    var id: EventID { event.eventID }
+    let groupID: GroupID
+    let event: LedgerEventRequest
+}
+
+// Kept only to migrate state files created before the generic outbox existed.
+private struct PendingExpenseEvent: Codable, Hashable, Identifiable {
     var id: EventID { event.eventID }
     let groupID: GroupID
     let event: ExpenseEventRequest
@@ -175,26 +228,33 @@ struct ExpenseAuditEntry: Codable, Hashable, Identifiable {
     let eventCreatedAt: Date
     var isPending: Bool
 
-    init(groupID: GroupID, event: ExpenseEventRequest, sequence: Int64? = nil, isPending: Bool) {
+    init?(groupID: GroupID, event: LedgerEventRequest, sequence: Int64? = nil, isPending: Bool) {
+        guard event.entityType == "expense",
+              let eventType = ExpenseEventType(rawValue: event.eventType),
+              let payload = event.expensePayload() else { return nil }
+
+        let expenseID = ExpenseID(rawValue: event.entityID)
         self.id = event.eventID
         self.groupID = groupID
         self.sequence = sequence
-        self.eventType = event.eventType
+        self.eventType = eventType
         self.actorID = event.actorID
-        self.expenseID = event.entityID
-        self.expenseName = event.payload.name
-        self.totalMinorUnits = event.payload.totalMinorUnits
-        self.currencyCode = event.payload.currencyCode
+        self.expenseID = expenseID
+        self.expenseName = payload.name
+        self.totalMinorUnits = payload.totalMinorUnits
+        self.currencyCode = payload.currencyCode
         self.eventCreatedAt = event.eventCreatedAt
         self.isPending = isPending
     }
 
-    init?(groupID: GroupID, pulledEvent: PulledExpenseEvent) {
-        guard let eventType = pulledEvent.eventType,
+    init?(groupID: GroupID, pulledEvent: PulledLedgerEvent) {
+        guard pulledEvent.entityType == "expense",
+              let eventType = pulledEvent.eventType.flatMap(ExpenseEventType.init(rawValue:)),
               let actorID = pulledEvent.actorID,
-              let expenseID = pulledEvent.entityID,
+              let expenseID = pulledEvent.entityID.flatMap(ExpenseID.init(rawValue:)),
               let eventCreatedAt = pulledEvent.eventCreatedAt,
-              let payload = pulledEvent.payload else { return nil }
+              let payloadValue = pulledEvent.payload,
+              let payload = try? payloadValue.decode(ExpensePayload.self) else { return nil }
 
         self.id = pulledEvent.eventID
         self.groupID = groupID
@@ -230,7 +290,7 @@ struct SplitSnapshot: Codable {
     var actors: [Actor]
     var groups: [ExpenseGroup]
     var expenses: [ExpenseRecord]
-    var pendingEvents: [PendingExpenseEvent]
+    var pendingOperations: [PendingSyncOperation]
     var auditEvents: [ExpenseAuditEntry]
     var groupBalances: [GroupID: GroupBalancesResponse]
     var nextClientSequence: Int64
@@ -241,6 +301,7 @@ struct SplitSnapshot: Codable {
         case actors
         case groups
         case expenses
+        case pendingOperations
         case pendingEvents
         case auditEvents
         case groupBalances
@@ -252,7 +313,7 @@ struct SplitSnapshot: Codable {
         actors: [Actor],
         groups: [ExpenseGroup],
         expenses: [ExpenseRecord],
-        pendingEvents: [PendingExpenseEvent],
+        pendingOperations: [PendingSyncOperation],
         auditEvents: [ExpenseAuditEntry],
         groupBalances: [GroupID: GroupBalancesResponse],
         nextClientSequence: Int64
@@ -262,7 +323,7 @@ struct SplitSnapshot: Codable {
         self.actors = actors
         self.groups = groups
         self.expenses = expenses
-        self.pendingEvents = pendingEvents
+        self.pendingOperations = pendingOperations
         self.auditEvents = auditEvents
         self.groupBalances = groupBalances
         self.nextClientSequence = nextClientSequence
@@ -274,8 +335,19 @@ struct SplitSnapshot: Codable {
         self.actors = try container.decode([Actor].self, forKey: .actors)
         self.groups = try container.decode([ExpenseGroup].self, forKey: .groups)
         self.expenses = try container.decodeIfPresent([ExpenseRecord].self, forKey: .expenses) ?? []
-        self.pendingEvents = try container.decodeIfPresent([PendingExpenseEvent].self, forKey: .pendingEvents) ?? []
-        self.auditEvents = try container.decodeIfPresent([ExpenseAuditEntry].self, forKey: .auditEvents) ?? pendingEvents.map { ExpenseAuditEntry(groupID: $0.groupID, event: $0.event, isPending: true) }
+        if let pendingOperations = try container.decodeIfPresent([PendingSyncOperation].self, forKey: .pendingOperations) {
+            self.pendingOperations = pendingOperations
+        } else {
+            let legacyEvents = try container.decodeIfPresent([PendingExpenseEvent].self, forKey: .pendingEvents) ?? []
+            self.pendingOperations = try legacyEvents.map { legacyEvent in
+                PendingSyncOperation(
+                    groupID: legacyEvent.groupID,
+                    event: try LedgerEventRequest(expenseEvent: legacyEvent.event)
+                )
+            }
+        }
+        self.auditEvents = try container.decodeIfPresent([ExpenseAuditEntry].self, forKey: .auditEvents)
+            ?? self.pendingOperations.compactMap { ExpenseAuditEntry(groupID: $0.groupID, event: $0.event, isPending: true) }
         self.groupBalances = try container.decodeIfPresent([GroupID: GroupBalancesResponse].self, forKey: .groupBalances) ?? [:]
         self.nextClientSequence = try container.decodeIfPresent(Int64.self, forKey: .nextClientSequence) ?? 0
 
@@ -294,7 +366,7 @@ struct SplitSnapshot: Codable {
         try container.encode(actors, forKey: .actors)
         try container.encode(groups, forKey: .groups)
         try container.encode(expenses, forKey: .expenses)
-        try container.encode(pendingEvents, forKey: .pendingEvents)
+        try container.encode(pendingOperations, forKey: .pendingOperations)
         try container.encode(auditEvents, forKey: .auditEvents)
         try container.encode(groupBalances, forKey: .groupBalances)
         try container.encode(nextClientSequence, forKey: .nextClientSequence)
@@ -346,7 +418,7 @@ final class SplitStore {
     private(set) var actors: [Actor]
     private(set) var groups: [ExpenseGroup]
     private(set) var expenses: [ExpenseRecord]
-    private(set) var pendingEvents: [PendingExpenseEvent]
+    private(set) var pendingOperations: [PendingSyncOperation]
     private(set) var auditEvents: [ExpenseAuditEntry]
     private(set) var groupBalances: [GroupID: GroupBalancesResponse]
     private(set) var registrationStatus: RegistrationStatus = .notStarted
@@ -390,7 +462,7 @@ final class SplitStore {
             self.actors = snapshot.actors
             self.groups = snapshot.groups
             self.expenses = snapshot.expenses
-            self.pendingEvents = snapshot.pendingEvents
+            self.pendingOperations = snapshot.pendingOperations
             self.auditEvents = snapshot.auditEvents
             self.groupBalances = snapshot.groupBalances
             self.nextClientSequence = snapshot.nextClientSequence
@@ -402,7 +474,7 @@ final class SplitStore {
             self.actors = []
             self.groups = []
             self.expenses = []
-            self.pendingEvents = []
+            self.pendingOperations = []
             self.auditEvents = []
             self.groupBalances = [:]
             self.nextClientSequence = 0
@@ -478,13 +550,15 @@ final class SplitStore {
         guard let group = groups.first(where: { $0.id == groupID }), group.actorIDs.contains(actorID) else { return }
 
         do {
-            let serverActor = try await apiClient.updateActorDisplayName(
+            let event = try makeActorDisplayNameEvent(
                 groupID: groupID,
                 actorID: actorID,
-                displayName: cleanName
+                displayName: cleanName,
+                baseSequence: actors.first(where: { $0.id == actorID })?.metadataVersion ?? 0
             )
-            upsertActor(serverActor, isLocal: actorID == group.localActorID)
-            persist()
+            enqueue(event, groupID: groupID)
+            applyLocalActorDisplayName(actorID: actorID, displayName: cleanName)
+            await syncGroup(id: groupID)
         } catch {
             registrationStatus = .failed(error.localizedDescription)
         }
@@ -493,13 +567,17 @@ final class SplitStore {
     func updateGroupName(in groupID: GroupID, to name: String) async {
         let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanName.isEmpty else { return }
-        guard groups.contains(where: { $0.id == groupID }) else { return }
+        guard let group = groups.first(where: { $0.id == groupID }) else { return }
 
         do {
-            let response = try await apiClient.updateGroupName(groupID: groupID, name: cleanName)
-            updateGroup(id: groupID) { group in
-                group.name = response.name
-            }
+            let event = try makeGroupNameEvent(
+                groupID: groupID,
+                name: cleanName,
+                baseSequence: group.metadataVersion
+            )
+            enqueue(event, groupID: groupID)
+            applyLocalGroupName(groupID: groupID, name: cleanName)
+            await syncGroup(id: groupID)
         } catch {
             registrationStatus = .failed(error.localizedDescription)
         }
@@ -508,7 +586,7 @@ final class SplitStore {
     func removeGroup(id: GroupID) {
         groups.removeAll { $0.id == id }
         expenses.removeAll { $0.groupID == id }
-        pendingEvents.removeAll { $0.groupID == id }
+        pendingOperations.removeAll { $0.groupID == id }
         auditEvents.removeAll { $0.groupID == id }
         groupBalances[id] = nil
         pruneUnusedActors()
@@ -615,16 +693,9 @@ final class SplitStore {
                 occurredAt: expense.payload.occurredAt
             )
 
-            let response = try await apiClient.updateExpense(groupID: expense.groupID, expenseID: expense.id, event: event)
-            upsertAuditEntry(ExpenseAuditEntry(groupID: expense.groupID, event: event, sequence: response.sequence, isPending: false))
-            if let serverExpense = response.expense {
-                upsertExpense(ExpenseRecord(serverExpense: serverExpense))
-            } else {
-                applyLocalExpense(event: event, groupID: expense.groupID)
-            }
-            try await refreshExpenses(for: expense.groupID)
-            try await refreshBalances(for: expense.groupID)
-            persist()
+            enqueue(event, groupID: expense.groupID)
+            applyLocalExpense(event: event, groupID: expense.groupID)
+            await syncGroup(id: expense.groupID)
         } catch {
             registrationStatus = .failed(error.localizedDescription)
         }
@@ -636,8 +707,8 @@ final class SplitStore {
         defer { syncingGroupIDs.remove(groupID) }
 
         do {
+            try await postPendingOperations(for: groupID)
             try await fetchGroups()
-            try await postPendingEvents(for: groupID)
             try await pullRemoteEvents(for: groupID)
             try await refreshAuditEvents(for: groupID)
             try await refreshExpenses(for: groupID)
@@ -662,7 +733,7 @@ final class SplitStore {
 
     private func refreshGroupsInBackground() {
         Task {
-            await refreshGroups()
+            await syncAllGroups()
         }
     }
 
@@ -674,22 +745,37 @@ final class SplitStore {
         }
     }
 
+    func syncAllGroups() async {
+        if groups.isEmpty {
+            await refreshGroups()
+        }
+
+        var syncedGroupIDs = Set<GroupID>()
+        while true {
+            let groupIDs = groups.map(\.id).filter { !syncedGroupIDs.contains($0) }
+            guard !groupIDs.isEmpty else { break }
+
+            for groupID in groupIDs {
+                await syncGroup(id: groupID)
+                syncedGroupIDs.insert(groupID)
+            }
+        }
+    }
+
     private func fetchGroups() async throws {
         let serverGroups = try await apiClient.fetchGroups()
         applyServerGroups(serverGroups)
     }
 
-    private func postPendingEvents(for groupID: GroupID) async throws {
-        let events = pendingEvents
+    private func postPendingOperations(for groupID: GroupID) async throws {
+        let operations = pendingOperations
             .filter { $0.groupID == groupID }
             .sorted { $0.event.clientSequence < $1.event.clientSequence }
 
-        for pendingEvent in events {
-            let response = try await apiClient.postExpenseEvent(groupID: groupID, event: pendingEvent.event)
-            if let expense = response.expense, response.conflict == true || response.applied == false {
-                upsertExpense(ExpenseRecord(serverExpense: expense))
-            }
-            acknowledgeEvent(id: pendingEvent.event.eventID, sequence: response.sequence)
+        for operation in operations {
+            let response = try await apiClient.postLedgerEvent(groupID: groupID, event: operation.event)
+            applyCanonicalState(response, for: operation.event, groupID: groupID)
+            acknowledgeOperation(id: operation.event.eventID, sequence: response.sequence)
         }
     }
 
@@ -710,9 +796,9 @@ final class SplitStore {
             }
 
             let eventIDs = Set(response.events.map(\.eventID))
-            pendingEvents.removeAll { $0.groupID == groupID && eventIDs.contains($0.event.eventID) }
+            pendingOperations.removeAll { $0.groupID == groupID && eventIDs.contains($0.event.eventID) }
             for eventID in eventIDs {
-                acknowledgeEvent(id: eventID, sequence: response.events.first { $0.eventID == eventID }?.sequence)
+                acknowledgeOperation(id: eventID, sequence: response.events.first { $0.eventID == eventID }?.sequence)
             }
             persist()
 
@@ -770,7 +856,7 @@ final class SplitStore {
         splitMethod: SplitMethod,
         manualSplits: [ExpenseSplit]?,
         occurredAt: Date
-    ) throws -> ExpenseEventRequest {
+    ) throws -> LedgerEventRequest {
         guard let group = groups.first(where: { $0.id == groupID }) else {
             throw SplitStoreError.groupNotFound
         }
@@ -790,39 +876,88 @@ final class SplitStore {
             splits = manualSplits
         }
 
-        let clientSequence = nextClientSequence
-        nextClientSequence += 1
-        persist()
+        let payload = ExpensePayload(
+            name: name,
+            description: description,
+            currencyCode: currencyCode,
+            totalMinorUnits: totalMinorUnits,
+            payerActorID: payerActorID,
+            splitMethod: splitMethod,
+            occurredAt: occurredAt,
+            splits: splits
+        )
 
-        return ExpenseEventRequest(
+        return LedgerEventRequest(
             eventID: .generate(),
-            entityID: expenseID,
-            eventType: eventType,
+            entityType: "expense",
+            entityID: expenseID.rawValue,
+            eventType: eventType.rawValue,
             actorID: group.localActorID,
             eventCreatedAt: Date(),
-            clientSequence: clientSequence,
+            clientSequence: allocateClientSequence(),
             baseSequence: baseSequence,
-            payload: ExpensePayload(
-                name: name,
-                description: description,
-                currencyCode: currencyCode,
-                totalMinorUnits: totalMinorUnits,
-                payerActorID: payerActorID,
-                splitMethod: splitMethod,
-                occurredAt: occurredAt,
-                splits: splits
-            )
+            payload: try JSONValue.fromEncodable(payload)
         )
     }
 
-    private func enqueue(_ event: ExpenseEventRequest, groupID: GroupID) {
-        pendingEvents.append(PendingExpenseEvent(groupID: groupID, event: event))
-        upsertAuditEntry(ExpenseAuditEntry(groupID: groupID, event: event, isPending: true))
+    private func makeGroupNameEvent(groupID: GroupID, name: String, baseSequence: Int64) throws -> LedgerEventRequest {
+        guard let group = groups.first(where: { $0.id == groupID }) else {
+            throw SplitStoreError.groupNotFound
+        }
+
+        return LedgerEventRequest(
+            eventID: .generate(),
+            entityType: "group",
+            entityID: groupID.rawValue,
+            eventType: "group.name_updated",
+            actorID: group.localActorID,
+            eventCreatedAt: Date(),
+            clientSequence: allocateClientSequence(),
+            baseSequence: baseSequence,
+            payload: .object(["name": .string(name)])
+        )
+    }
+
+    private func makeActorDisplayNameEvent(
+        groupID: GroupID,
+        actorID: ActorID,
+        displayName: String,
+        baseSequence: Int64
+    ) throws -> LedgerEventRequest {
+        guard let group = groups.first(where: { $0.id == groupID }), group.actorIDs.contains(actorID) else {
+            throw SplitStoreError.groupNotFound
+        }
+
+        return LedgerEventRequest(
+            eventID: .generate(),
+            entityType: "actor",
+            entityID: actorID.rawValue,
+            eventType: "actor.display_name_updated",
+            actorID: group.localActorID,
+            eventCreatedAt: Date(),
+            clientSequence: allocateClientSequence(),
+            baseSequence: baseSequence,
+            payload: .object(["display_name": .string(displayName)])
+        )
+    }
+
+    private func allocateClientSequence() -> Int64 {
+        let sequence = nextClientSequence
+        nextClientSequence += 1
+        persist()
+        return sequence
+    }
+
+    private func enqueue(_ event: LedgerEventRequest, groupID: GroupID) {
+        pendingOperations.append(PendingSyncOperation(groupID: groupID, event: event))
+        if let auditEntry = ExpenseAuditEntry(groupID: groupID, event: event, isPending: true) {
+            upsertAuditEntry(auditEntry)
+        }
         persist()
     }
 
-    private func acknowledgeEvent(id eventID: EventID, sequence: Int64?) {
-        pendingEvents.removeAll { $0.event.eventID == eventID }
+    private func acknowledgeOperation(id eventID: EventID, sequence: Int64?) {
+        pendingOperations.removeAll { $0.event.eventID == eventID }
         if let index = auditEvents.firstIndex(where: { $0.id == eventID }) {
             auditEvents[index].isPending = false
             auditEvents[index].sequence = sequence ?? auditEvents[index].sequence
@@ -857,17 +992,22 @@ final class SplitStore {
         return merged
     }
 
-    private func applyLocalExpense(event: ExpenseEventRequest, groupID: GroupID) {
+    private func applyLocalExpense(event: LedgerEventRequest, groupID: GroupID) {
+        guard let payload = event.expensePayload(),
+              let eventType = ExpenseEventType(rawValue: event.eventType) else { return }
+
+        let expenseID = ExpenseID(rawValue: event.entityID)
         let now = Date()
+        let existingCreatedAt = expenses.first(where: { $0.id == expenseID })?.createdAt ?? now
         let expense = ExpenseRecord(
-            id: event.entityID,
+            id: expenseID,
             groupID: groupID,
             createdByActorID: event.actorID,
-            payload: event.payload,
-            createdAt: now,
+            payload: payload,
+            createdAt: existingCreatedAt,
             updatedAt: now,
             version: event.baseSequence,
-            voidedAt: event.eventType == .voided ? event.eventCreatedAt : nil
+            voidedAt: eventType == .voided || eventType == .deleted ? event.eventCreatedAt : nil
         )
         upsertExpense(expense)
         persist()
@@ -879,6 +1019,43 @@ final class SplitStore {
         } else {
             expenses.append(expense)
         }
+    }
+
+    private func applyLocalGroupName(groupID: GroupID, name: String) {
+        updateGroup(id: groupID) { group in
+            group.name = name
+        }
+    }
+
+    private func applyLocalActorDisplayName(actorID: ActorID, displayName: String) {
+        guard let index = actors.firstIndex(where: { $0.id == actorID }) else { return }
+        actors[index].displayName = displayName
+        if actors[index].isLocal {
+            self.displayName = displayName
+        }
+        persist()
+    }
+
+    private func applyCanonicalState(_ response: PostEventResponse, for event: LedgerEventRequest, groupID: GroupID) {
+        if let serverExpense = response.expense {
+            upsertExpense(ExpenseRecord(serverExpense: serverExpense))
+        }
+
+        if let serverGroup = response.group,
+           let index = groups.firstIndex(where: { $0.id == serverGroup.id }) {
+            groups[index].name = serverGroup.name
+            groups[index].serverLatestEventSequence = max(
+                groups[index].serverLatestEventSequence,
+                serverGroup.latestEventSequence
+            )
+            groups[index].metadataVersion = serverGroup.metadataVersion
+        }
+
+        if let serverActor = response.actor,
+           let group = groups.first(where: { $0.id == groupID }) {
+            upsertActor(serverActor, isLocal: serverActor.id == group.localActorID)
+        }
+
     }
 
     private func applyServerGroups(_ serverGroups: [ServerGroup]) {
@@ -917,6 +1094,7 @@ final class SplitStore {
             actorIDs: serverGroup.actorIDs,
             syncCursor: existingGroup?.syncCursor ?? 0,
             serverLatestEventSequence: serverGroup.latestEventSequence,
+            metadataVersion: serverGroup.metadataVersion,
             createdAt: serverGroup.createdAt
         )
     }
@@ -934,9 +1112,17 @@ final class SplitStore {
     private func upsertActors(from serverGroup: ServerGroup) {
         for serverActor in serverGroup.actors {
             if serverActor.id == serverGroup.actorID {
-                upsertLocalActor(id: serverActor.id, serverDisplayName: serverActor.displayName)
+                upsertLocalActor(
+                    id: serverActor.id,
+                    serverDisplayName: serverActor.displayName,
+                    metadataVersion: serverActor.metadataVersion
+                )
             } else {
-                upsertRemoteActor(id: serverActor.id, displayName: serverActor.displayName)
+                upsertRemoteActor(
+                    id: serverActor.id,
+                    displayName: serverActor.displayName,
+                    metadataVersion: serverActor.metadataVersion
+                )
             }
         }
 
@@ -947,13 +1133,21 @@ final class SplitStore {
 
     private func upsertActor(_ serverActor: ServerActor, isLocal: Bool) {
         if isLocal {
-            upsertLocalActor(id: serverActor.id, serverDisplayName: serverActor.displayName)
+            upsertLocalActor(
+                id: serverActor.id,
+                serverDisplayName: serverActor.displayName,
+                metadataVersion: serverActor.metadataVersion
+            )
         } else {
-            upsertRemoteActor(id: serverActor.id, displayName: serverActor.displayName)
+            upsertRemoteActor(
+                id: serverActor.id,
+                displayName: serverActor.displayName,
+                metadataVersion: serverActor.metadataVersion
+            )
         }
     }
 
-    private func upsertRemoteActor(id actorID: ActorID, displayName: String?) {
+    private func upsertRemoteActor(id actorID: ActorID, displayName: String?, metadataVersion: Int64? = nil) {
         let name = displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedName = name.flatMap { $0.isEmpty ? nil : $0 } ?? actorID.rawValue
 
@@ -961,8 +1155,17 @@ final class SplitStore {
             guard !actors[index].isLocal else { return }
             actors[index].displayName = resolvedName
             actors[index].deviceID = nil
+            if let metadataVersion {
+                actors[index].metadataVersion = metadataVersion
+            }
         } else {
-            actors.append(Actor(id: actorID, displayName: resolvedName, deviceID: nil, isLocal: false))
+            actors.append(Actor(
+                id: actorID,
+                displayName: resolvedName,
+                deviceID: nil,
+                isLocal: false,
+                metadataVersion: metadataVersion ?? 0
+            ))
         }
     }
 
@@ -993,15 +1196,28 @@ final class SplitStore {
         persist()
     }
 
-    private func upsertLocalActor(id actorID: ActorID, serverDisplayName: String? = nil) {
+    private func upsertLocalActor(
+        id actorID: ActorID,
+        serverDisplayName: String? = nil,
+        metadataVersion: Int64? = nil
+    ) {
         let serverName = serverDisplayName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedName = serverName.flatMap { $0.isEmpty ? nil : $0 } ?? displayName
 
         if let index = actors.firstIndex(where: { $0.id == actorID }) {
             actors[index].displayName = resolvedName
             actors[index].deviceID = deviceID
+            if let metadataVersion {
+                actors[index].metadataVersion = metadataVersion
+            }
         } else {
-            actors.append(Actor(id: actorID, displayName: resolvedName, deviceID: deviceID, isLocal: true))
+            actors.append(Actor(
+                id: actorID,
+                displayName: resolvedName,
+                deviceID: deviceID,
+                isLocal: true,
+                metadataVersion: metadataVersion ?? 0
+            ))
         }
     }
 
@@ -1021,7 +1237,7 @@ final class SplitStore {
                 actors: actors,
                 groups: groups,
                 expenses: expenses,
-                pendingEvents: pendingEvents,
+                pendingOperations: pendingOperations,
                 auditEvents: auditEvents,
                 groupBalances: groupBalances,
                 nextClientSequence: nextClientSequence

@@ -108,16 +108,19 @@ struct UpdatedGroupNameResponse: Decodable {
 struct ServerActor: Decodable, Hashable {
     let id: ActorID
     let displayName: String?
+    let metadataVersion: Int64
 
     private enum CodingKeys: String, CodingKey {
         case actor_uuid
         case display_name
         case name
+        case latest_metadata_event_sequence
     }
 
-    init(id: ActorID, displayName: String?) {
+    init(id: ActorID, displayName: String?, metadataVersion: Int64 = 0) {
         self.id = id
         self.displayName = displayName
+        self.metadataVersion = metadataVersion
     }
 
     init(from decoder: Decoder) throws {
@@ -125,6 +128,7 @@ struct ServerActor: Decodable, Hashable {
         self.id = ActorID(rawValue: try container.decode(String.self, forKey: .actor_uuid))
         self.displayName = try container.decodeIfPresent(String.self, forKey: .display_name)
             ?? container.decodeIfPresent(String.self, forKey: .name)
+        self.metadataVersion = try container.decodeIfPresent(Int64.self, forKey: .latest_metadata_event_sequence) ?? 0
     }
 }
 
@@ -135,6 +139,7 @@ struct ServerGroup: Decodable {
     let joinCode: String
     let actorID: ActorID
     let latestEventSequence: Int64
+    let metadataVersion: Int64
     let actors: [ServerActor]
 
     private enum CodingKeys: String, CodingKey {
@@ -144,6 +149,7 @@ struct ServerGroup: Decodable {
         case join_code
         case actor_uuid
         case latest_event_sequence
+        case latest_metadata_event_sequence
         case actors
     }
 
@@ -157,6 +163,7 @@ struct ServerGroup: Decodable {
         self.joinCode = try container.decode(String.self, forKey: .join_code)
         self.actorID = actorID
         self.latestEventSequence = try container.decodeIfPresent(Int64.self, forKey: .latest_event_sequence) ?? 0
+        self.metadataVersion = try container.decodeIfPresent(Int64.self, forKey: .latest_metadata_event_sequence) ?? 0
         self.actors = try container.decodeIfPresent([ServerActor].self, forKey: .actors)
             ?? [ServerActor(id: actorID, displayName: nil)]
     }
@@ -283,6 +290,7 @@ struct SuggestedTransfer: Codable, Hashable, Identifiable {
 
 enum JSONValue: Codable, Hashable {
     case string(String)
+    case integer(Int64)
     case number(Double)
     case bool(Bool)
     case object([String: JSONValue])
@@ -295,6 +303,8 @@ enum JSONValue: Codable, Hashable {
             self = .null
         } else if let value = try? container.decode(Bool.self) {
             self = .bool(value)
+        } else if let value = try? container.decode(Int64.self) {
+            self = .integer(value)
         } else if let value = try? container.decode(Double.self) {
             self = .number(value)
         } else if let value = try? container.decode(String.self) {
@@ -311,6 +321,8 @@ enum JSONValue: Codable, Hashable {
         switch self {
         case .string(let value):
             try container.encode(value)
+        case .integer(let value):
+            try container.encode(value)
         case .number(let value):
             try container.encode(value)
         case .bool(let value):
@@ -322,6 +334,21 @@ enum JSONValue: Codable, Hashable {
         case .null:
             try container.encodeNil()
         }
+    }
+
+    static func fromEncodable<Value: Encodable>(_ value: Value) throws -> JSONValue {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(JSONValue.self, from: encoder.encode(value))
+    }
+
+    func decode<Value: Decodable>(_ type: Value.Type) throws -> Value {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(type, from: encoder.encode(self))
     }
 }
 
@@ -578,10 +605,110 @@ struct ExpenseEventRequest: Codable, Hashable, Identifiable {
     }
 }
 
+struct LedgerEventRequest: Codable, Hashable, Identifiable {
+    var id: EventID { eventID }
+    let eventID: EventID
+    let entityType: String
+    let entityID: String
+    let eventType: String
+    let actorID: ActorID
+    let eventCreatedAt: Date
+    let clientSequence: Int64
+    let baseSequence: Int64
+    let payloadVersion: Int
+    let payload: JSONValue
+
+    private enum CodingKeys: String, CodingKey {
+        case event_uuid
+        case entity_type
+        case entity_uuid
+        case event_type
+        case actor_uuid
+        case event_created_at
+        case client_sequence
+        case base_sequence
+        case payload_version
+        case payload
+    }
+
+    init(
+        eventID: EventID,
+        entityType: String,
+        entityID: String,
+        eventType: String,
+        actorID: ActorID,
+        eventCreatedAt: Date,
+        clientSequence: Int64,
+        baseSequence: Int64,
+        payloadVersion: Int = 1,
+        payload: JSONValue
+    ) {
+        self.eventID = eventID
+        self.entityType = entityType
+        self.entityID = entityID
+        self.eventType = eventType
+        self.actorID = actorID
+        self.eventCreatedAt = eventCreatedAt
+        self.clientSequence = clientSequence
+        self.baseSequence = baseSequence
+        self.payloadVersion = payloadVersion
+        self.payload = payload
+    }
+
+    init(expenseEvent: ExpenseEventRequest) throws {
+        self.init(
+            eventID: expenseEvent.eventID,
+            entityType: expenseEvent.entityType,
+            entityID: expenseEvent.entityID.rawValue,
+            eventType: expenseEvent.eventType.rawValue,
+            actorID: expenseEvent.actorID,
+            eventCreatedAt: expenseEvent.eventCreatedAt,
+            clientSequence: expenseEvent.clientSequence,
+            baseSequence: expenseEvent.baseSequence,
+            payloadVersion: expenseEvent.payloadVersion,
+            payload: try JSONValue.fromEncodable(expenseEvent.payload)
+        )
+    }
+
+    func expensePayload() -> ExpensePayload? {
+        guard entityType == "expense" else { return nil }
+        return try? payload.decode(ExpensePayload.self)
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.eventID = EventID(rawValue: try container.decode(String.self, forKey: .event_uuid))
+        self.entityType = try container.decode(String.self, forKey: .entity_type)
+        self.entityID = try container.decode(String.self, forKey: .entity_uuid)
+        self.eventType = try container.decode(String.self, forKey: .event_type)
+        self.actorID = ActorID(rawValue: try container.decode(String.self, forKey: .actor_uuid))
+        self.eventCreatedAt = try container.decode(Date.self, forKey: .event_created_at)
+        self.clientSequence = try container.decode(Int64.self, forKey: .client_sequence)
+        self.baseSequence = try container.decode(Int64.self, forKey: .base_sequence)
+        self.payloadVersion = try container.decode(Int.self, forKey: .payload_version)
+        self.payload = try container.decode(JSONValue.self, forKey: .payload)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(eventID.rawValue, forKey: .event_uuid)
+        try container.encode(entityType, forKey: .entity_type)
+        try container.encode(entityID, forKey: .entity_uuid)
+        try container.encode(eventType, forKey: .event_type)
+        try container.encode(actorID.rawValue, forKey: .actor_uuid)
+        try container.encode(eventCreatedAt, forKey: .event_created_at)
+        try container.encode(clientSequence, forKey: .client_sequence)
+        try container.encode(baseSequence, forKey: .base_sequence)
+        try container.encode(payloadVersion, forKey: .payload_version)
+        try container.encode(payload, forKey: .payload)
+    }
+}
+
 enum ExpenseEventType: String, Codable, Hashable {
     case created = "expense.created"
     case updated = "expense.updated"
     case voided = "expense.voided"
+    case deleted = "expense.deleted"
 }
 
 struct ExpenseReplacementRequest: Encodable {
@@ -615,6 +742,8 @@ struct PostEventResponse: Decodable {
     let replayed: Bool?
     let conflict: Bool?
     let expense: ServerExpense?
+    let group: ServerGroupMetadata?
+    let actor: ServerActor?
 
     private enum CodingKeys: String, CodingKey {
         case sequence
@@ -623,6 +752,8 @@ struct PostEventResponse: Decodable {
         case replayed
         case conflict
         case expense
+        case group
+        case actor
     }
 
     private enum EventCodingKeys: String, CodingKey {
@@ -644,22 +775,48 @@ struct PostEventResponse: Decodable {
         }
 
         self.expense = try? container.decodeIfPresent(ServerExpense.self, forKey: .expense)
+        self.group = try? container.decodeIfPresent(ServerGroupMetadata.self, forKey: .group)
+        self.actor = try? container.decodeIfPresent(ServerActor.self, forKey: .actor)
     }
 }
 
-struct PulledExpenseEvent: Decodable, Identifiable, Hashable {
+struct ServerGroupMetadata: Decodable, Hashable {
+    let id: GroupID
+    let name: String
+    let latestEventSequence: Int64
+    let metadataVersion: Int64
+
+    private enum CodingKeys: String, CodingKey {
+        case uuid
+        case name
+        case latest_event_sequence
+        case latest_metadata_event_sequence
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = GroupID(rawValue: try container.decode(String.self, forKey: .uuid))
+        self.name = try container.decode(String.self, forKey: .name)
+        self.latestEventSequence = try container.decodeIfPresent(Int64.self, forKey: .latest_event_sequence) ?? 0
+        self.metadataVersion = try container.decodeIfPresent(Int64.self, forKey: .latest_metadata_event_sequence) ?? 0
+    }
+}
+
+struct PulledLedgerEvent: Decodable, Identifiable, Hashable {
     var id: EventID { eventID }
     let eventID: EventID
     let sequence: Int64
-    let entityID: ExpenseID?
-    let eventType: ExpenseEventType?
+    let entityType: String?
+    let entityID: String?
+    let eventType: String?
     let actorID: ActorID?
     let eventCreatedAt: Date?
-    let payload: ExpensePayload?
+    let payload: JSONValue?
 
     private enum CodingKeys: String, CodingKey {
         case event_uuid
         case sequence
+        case entity_type
         case entity_uuid
         case event_type
         case actor_uuid
@@ -671,16 +828,17 @@ struct PulledExpenseEvent: Decodable, Identifiable, Hashable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.eventID = EventID(rawValue: try container.decode(String.self, forKey: .event_uuid))
         self.sequence = try container.decode(Int64.self, forKey: .sequence)
-        self.entityID = try container.decodeIfPresent(String.self, forKey: .entity_uuid).map(ExpenseID.init(rawValue:))
-        self.eventType = try container.decodeIfPresent(ExpenseEventType.self, forKey: .event_type)
+        self.entityType = try container.decodeIfPresent(String.self, forKey: .entity_type)
+        self.entityID = try container.decodeIfPresent(String.self, forKey: .entity_uuid)
+        self.eventType = try container.decodeIfPresent(String.self, forKey: .event_type)
         self.actorID = try container.decodeIfPresent(String.self, forKey: .actor_uuid).map(ActorID.init(rawValue:))
         self.eventCreatedAt = try container.decodeIfPresent(Date.self, forKey: .event_created_at)
-        self.payload = try container.decodeIfPresent(ExpensePayload.self, forKey: .payload)
+        self.payload = try container.decodeIfPresent(JSONValue.self, forKey: .payload)
     }
 }
 
 struct GroupEventsResponse: Decodable {
-    let events: [PulledExpenseEvent]
+    let events: [PulledLedgerEvent]
     let hasMore: Bool
 
     private enum CodingKeys: String, CodingKey {
@@ -690,7 +848,7 @@ struct GroupEventsResponse: Decodable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.events = try container.decode([PulledExpenseEvent].self, forKey: .events)
+        self.events = try container.decode([PulledLedgerEvent].self, forKey: .events)
         self.hasMore = try container.decode(Bool.self, forKey: .has_more)
     }
 }
@@ -752,15 +910,17 @@ struct SplitAPIClient {
     func updateActorDisplayName(groupID: GroupID, actorID: ActorID, displayName: String) async throws -> ServerActor {
         var request = try authorizedRequest(path: "/groups/\(groupID.rawValue)/actors/\(actorID.rawValue)", method: "PATCH")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(UUID().uuidString, forHTTPHeaderField: "Idempotency-Key")
         request.httpBody = try encoder.encode(UpdateActorDisplayNameRequest(displayName: displayName))
-        return try await send(request)
+        return try await sendWithRetry(request)
     }
 
     func updateGroupName(groupID: GroupID, name: String) async throws -> UpdatedGroupNameResponse {
         var request = try authorizedRequest(path: "/groups/\(groupID.rawValue)", method: "PATCH")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(UUID().uuidString, forHTTPHeaderField: "Idempotency-Key")
         request.httpBody = try encoder.encode(UpdateGroupNameRequest(name: name))
-        return try await send(request)
+        return try await sendWithRetry(request)
     }
 
     func fetchExpenses(groupID: GroupID) async throws -> [ServerExpense] {
@@ -775,17 +935,24 @@ struct SplitAPIClient {
     }
 
     func postExpenseEvent(groupID: GroupID, event: ExpenseEventRequest) async throws -> PostEventResponse {
+        return try await postLedgerEvent(
+            groupID: groupID,
+            event: try LedgerEventRequest(expenseEvent: event)
+        )
+    }
+
+    func postLedgerEvent(groupID: GroupID, event: LedgerEventRequest) async throws -> PostEventResponse {
         var request = try authorizedRequest(path: "/groups/\(groupID.rawValue)/events", method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(event)
-        return try await send(request)
+        return try await sendWithRetry(request)
     }
 
     func updateExpense(groupID: GroupID, expenseID: ExpenseID, event: ExpenseEventRequest) async throws -> PostEventResponse {
         var request = try authorizedRequest(path: "/groups/\(groupID.rawValue)/expenses/\(expenseID.rawValue)", method: "PUT")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(ExpenseReplacementRequest(event: event))
-        return try await send(request)
+        return try await sendWithRetry(request)
     }
 
     func fetchGroupEvents(groupID: GroupID, after cursor: Int64, limit: Int = 100) async throws -> GroupEventsResponse {
@@ -821,6 +988,42 @@ struct SplitAPIClient {
         let (data, response) = try await session.data(for: request)
         try validate(response: response, data: data)
         return try decoder.decode(Response.self, from: data)
+    }
+
+    private func sendWithRetry<Response: Decodable>(_ request: URLRequest) async throws -> Response {
+        let maximumAttempts = 3
+        var delayNanoseconds: UInt64 = 250_000_000
+
+        for attempt in 1...maximumAttempts {
+            do {
+                return try await send(request)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let error as URLError where error.code == .cancelled {
+                throw error
+            } catch {
+                guard attempt < maximumAttempts, isRetryable(error) else { throw error }
+                try await Task.sleep(nanoseconds: delayNanoseconds)
+                delayNanoseconds *= 2
+            }
+        }
+
+        throw URLError(.cannotLoadFromNetwork)
+    }
+
+    private func isRetryable(_ error: Error) -> Bool {
+        if let apiError = error as? APIError {
+            return apiError.statusCode == 408 || apiError.statusCode == 429 || (500...599).contains(apiError.statusCode)
+        }
+
+        guard let urlError = error as? URLError else { return false }
+        switch urlError.code {
+        case .timedOut, .cannotFindHost, .cannotConnectToHost, .networkConnectionLost,
+             .notConnectedToInternet, .dnsLookupFailed, .resourceUnavailable:
+            return true
+        default:
+            return false
+        }
     }
 
     private func url(for path: String) -> URL {

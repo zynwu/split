@@ -47,6 +47,19 @@ func updateGroupNameHandler(db *database.Database) http.HandlerFunc {
 			return
 		}
 
+		event, err := metadataEventInput(
+			request,
+			groupUUID,
+			"group",
+			groupUUID,
+			"group.name_updated",
+			database.GroupNameEventPayload{Name: name},
+		)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+
 		deviceID, ok := deviceIDFromContext(request.Context())
 		if !ok {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{
@@ -55,26 +68,28 @@ func updateGroupNameHandler(db *database.Database) http.HandlerFunc {
 			return
 		}
 
-		group, err := db.UpdateGroupName(request.Context(), groupUUID, deviceID, name)
+		result, err := db.AppendLedgerEvent(request.Context(), deviceID, event)
 		if err != nil {
-			switch {
-			case errors.Is(err, database.ErrGroupNotFound), errors.Is(err, database.ErrGroupMembershipDenied):
-				writeJSON(w, http.StatusNotFound, map[string]string{
-					"error": "group not found",
-				})
-			case errors.Is(err, database.ErrInvalidGroupName):
-				writeJSON(w, http.StatusBadRequest, map[string]string{
-					"error": err.Error(),
-				})
-			default:
-				log.Printf("updating group name failed: %v", err)
-				writeJSON(w, http.StatusInternalServerError, map[string]string{
-					"error": "could not update group name",
-				})
+			if errors.Is(err, database.ErrInvalidExpensePayload) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
 			}
+			if writeGroupAccessError(w, err) {
+				return
+			}
+			log.Printf("updating group name failed: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "could not update group name",
+			})
+			return
+		}
+		if result.Group == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "group metadata result is missing",
+			})
 			return
 		}
 
-		writeJSON(w, http.StatusOK, group)
+		writeJSON(w, http.StatusOK, result.Group)
 	}
 }

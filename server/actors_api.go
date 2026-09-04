@@ -57,6 +57,19 @@ func updateActorDisplayNameHandler(db *database.Database) http.HandlerFunc {
 			return
 		}
 
+		event, err := metadataEventInput(
+			request,
+			groupUUID,
+			"actor",
+			actorUUID,
+			"actor.display_name_updated",
+			database.ActorDisplayNameEventPayload{DisplayName: displayName},
+		)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+
 		deviceID, ok := deviceIDFromContext(request.Context())
 		if !ok {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{
@@ -65,16 +78,14 @@ func updateActorDisplayNameHandler(db *database.Database) http.HandlerFunc {
 			return
 		}
 
-		actor, err := db.UpdateActorDisplayName(request.Context(), groupUUID, actorUUID, deviceID, displayName)
+		result, err := db.AppendLedgerEvent(request.Context(), deviceID, event)
 		if err != nil {
 			switch {
+			case errors.Is(err, database.ErrInvalidExpensePayload):
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			case errors.Is(err, database.ErrGroupNotFound), errors.Is(err, database.ErrGroupMembershipDenied), errors.Is(err, database.ErrActorNotFound):
 				writeJSON(w, http.StatusNotFound, map[string]string{
 					"error": "group or actor not found",
-				})
-			case errors.Is(err, database.ErrInvalidDisplayName):
-				writeJSON(w, http.StatusBadRequest, map[string]string{
-					"error": err.Error(),
 				})
 			default:
 				log.Printf("updating actor display name failed: %v", err)
@@ -84,7 +95,13 @@ func updateActorDisplayNameHandler(db *database.Database) http.HandlerFunc {
 			}
 			return
 		}
+		if result.Actor == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "actor metadata result is missing",
+			})
+			return
+		}
 
-		writeJSON(w, http.StatusOK, actor)
+		writeJSON(w, http.StatusOK, result.Actor)
 	}
 }

@@ -62,18 +62,30 @@ type ExpenseEventPayload struct {
 	Splits          []ExpenseSplit  `json:"splits"`
 }
 
+type GroupNameEventPayload struct {
+	Name string `json:"name"`
+}
+
+type ActorDisplayNameEventPayload struct {
+	DisplayName string `json:"display_name"`
+}
+
 type LedgerEventInput struct {
-	EventUUID      string
-	GroupUUID      string
-	EntityType     string
-	EntityUUID     string
-	EventType      string
-	ActorUUID      string
-	EventCreatedAt time.Time
-	ClientSequence int64
-	BaseSequence   int64
-	PayloadVersion int
-	Payload        json.RawMessage
+	EventUUID          string
+	GroupUUID          string
+	EntityType         string
+	EntityUUID         string
+	EventType          string
+	ActorUUID          string
+	EventCreatedAt     time.Time
+	ClientSequence     int64
+	BaseSequence       int64
+	PayloadVersion     int
+	Payload            json.RawMessage
+	AutoActorUUID      bool
+	AutoEventCreatedAt bool
+	AutoClientSequence bool
+	AutoBaseSequence   bool
 }
 
 type LedgerEvent struct {
@@ -98,6 +110,8 @@ type LedgerEvent struct {
 type AppendLedgerEventResult struct {
 	Event    LedgerEvent `json:"event"`
 	Expense  *Expense    `json:"expense,omitempty"`
+	Group    *Group      `json:"group,omitempty"`
+	Actor    *GroupActor `json:"actor,omitempty"`
 	Applied  bool        `json:"applied"`
 	Conflict bool        `json:"conflict"`
 	Replayed bool        `json:"replayed"`
@@ -114,13 +128,20 @@ type sqlQueryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
+type normalizedLedgerEvent struct {
+	input                   LedgerEventInput
+	expensePayload          *ExpenseEventPayload
+	groupNamePayload        *GroupNameEventPayload
+	actorDisplayNamePayload *ActorDisplayNameEventPayload
+}
+
 func (database *Database) AppendLedgerEvent(ctx context.Context, deviceID string, input LedgerEventInput) (AppendLedgerEventResult, error) {
-	normalized, payload, err := normalizeLedgerEvent(input)
+	normalized, err := normalizeLedgerEvent(input)
 	if err != nil {
 		return AppendLedgerEventResult{}, err
 	}
 
-	eventHash := sha256.Sum256(normalized.Payload)
+	eventHash := sha256.Sum256(normalized.input.Payload)
 	tx, err := database.db.BeginTx(ctx, nil)
 	if err != nil {
 		return AppendLedgerEventResult{}, fmt.Errorf("begin ledger event transaction: %w", err)
@@ -128,19 +149,38 @@ func (database *Database) AppendLedgerEvent(ctx context.Context, deviceID string
 	defer tx.Rollback()
 
 	var currentGroupSequence int64
+	var group Group
 	err = tx.QueryRowContext(ctx, `
-		SELECT latest_event_sequence
+		SELECT uuid, name, creation_date, join_code, latest_event_sequence,
+			latest_metadata_event_sequence
 		FROM groups
 		WHERE uuid = $1
-		FOR UPDATE`, normalized.GroupUUID).Scan(&currentGroupSequence)
+		FOR UPDATE`, normalized.input.GroupUUID).Scan(
+		&group.UUID,
+		&group.Name,
+		&group.CreationDate,
+		&group.JoinCode,
+		&group.LatestEventSequence,
+		&group.LatestMetadataEventSequence,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AppendLedgerEventResult{}, ErrGroupNotFound
 	}
 	if err != nil {
 		return AppendLedgerEventResult{}, fmt.Errorf("lock group for ledger event: %w", err)
 	}
+	currentGroupSequence = group.LatestEventSequence
+	if normalized.input.AutoActorUUID {
+		normalized.input.ActorUUID, err = activeActorUUIDForDeviceTx(ctx, tx, normalized.input.GroupUUID, deviceID)
+		if err != nil {
+			return AppendLedgerEventResult{}, err
+		}
+	}
+	if normalized.input.AutoEventCreatedAt {
+		normalized.input.EventCreatedAt = time.Now().UTC().Truncate(time.Microsecond)
+	}
 
-	member, err := activeGroupMembershipTx(ctx, tx, normalized.GroupUUID, deviceID)
+	member, err := activeGroupMembershipTx(ctx, tx, normalized.input.GroupUUID, deviceID)
 	if err != nil {
 		return AppendLedgerEventResult{}, fmt.Errorf("check group membership: %w", err)
 	}
@@ -148,7 +188,7 @@ func (database *Database) AppendLedgerEvent(ctx context.Context, deviceID string
 		return AppendLedgerEventResult{}, ErrGroupMembershipDenied
 	}
 
-	actorExists, err := activeActorTx(ctx, tx, normalized.GroupUUID, normalized.ActorUUID)
+	actorExists, err := activeActorTx(ctx, tx, normalized.input.GroupUUID, normalized.input.ActorUUID)
 	if err != nil {
 		return AppendLedgerEventResult{}, fmt.Errorf("check event actor: %w", err)
 	}
@@ -156,7 +196,7 @@ func (database *Database) AppendLedgerEvent(ctx context.Context, deviceID string
 		return AppendLedgerEventResult{}, ErrActorNotFound
 	}
 
-	actorBound, err := activeActorDeviceBindingTx(ctx, tx, normalized.GroupUUID, normalized.ActorUUID, deviceID)
+	actorBound, err := activeActorDeviceBindingTx(ctx, tx, normalized.input.GroupUUID, normalized.input.ActorUUID, deviceID)
 	if err != nil {
 		return AppendLedgerEventResult{}, fmt.Errorf("check event actor device binding: %w", err)
 	}
@@ -164,29 +204,37 @@ func (database *Database) AppendLedgerEvent(ctx context.Context, deviceID string
 		return AppendLedgerEventResult{}, ErrActorDeviceMismatch
 	}
 
-	existingEvent, err := findLedgerEventByUUIDTx(ctx, tx, normalized.EventUUID)
+	existingEvent, err := findLedgerEventByUUIDTx(ctx, tx, normalized.input.EventUUID)
 	if err == nil {
-		if !ledgerEventsEqual(existingEvent, normalized, deviceID, eventHash[:]) {
+		if normalized.input.AutoActorUUID {
+			normalized.input.ActorUUID = existingEvent.ActorUUID
+		}
+		if normalized.input.AutoEventCreatedAt {
+			normalized.input.EventCreatedAt = existingEvent.EventCreatedAt
+		}
+		if normalized.input.AutoClientSequence {
+			normalized.input.ClientSequence = existingEvent.ClientSequence
+		}
+		if normalized.input.AutoBaseSequence {
+			normalized.input.BaseSequence = existingEvent.BaseSequence
+		}
+		if !ledgerEventsEqual(existingEvent, normalized.input, deviceID, eventHash[:]) {
 			return AppendLedgerEventResult{}, ErrLedgerEventConflict
 		}
-
-		expense, expenseErr := loadExpenseTx(ctx, tx, normalized.GroupUUID, normalized.EntityUUID)
-		if expenseErr != nil && !errors.Is(expenseErr, ErrExpenseNotFound) {
-			return AppendLedgerEventResult{}, expenseErr
-		}
-		return AppendLedgerEventResult{
-			Event:    existingEvent,
-			Expense:  expenseOrNil(expense, expenseErr),
-			Applied:  expenseErr == nil && expense.LatestEventSequence == existingEvent.Sequence,
-			Conflict: existingEvent.HadConflict,
-			Replayed: true,
-		}, nil
+		return replayLedgerEventTx(ctx, tx, existingEvent)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return AppendLedgerEventResult{}, fmt.Errorf("check duplicate ledger event: %w", err)
 	}
 
-	existingSequenceEvent, err := findLedgerEventByClientSequenceTx(ctx, tx, deviceID, normalized.ClientSequence)
+	if normalized.input.AutoClientSequence {
+		normalized.input.ClientSequence, err = nextClientSequenceTx(ctx, tx, deviceID)
+		if err != nil {
+			return AppendLedgerEventResult{}, err
+		}
+	}
+
+	existingSequenceEvent, err := findLedgerEventByClientSequenceTx(ctx, tx, deviceID, normalized.input.ClientSequence)
 	if err == nil {
 		return AppendLedgerEventResult{}, fmt.Errorf("%w: %s", ErrClientSequenceConflict, existingSequenceEvent.EventUUID)
 	}
@@ -194,135 +242,249 @@ func (database *Database) AppendLedgerEvent(ctx context.Context, deviceID string
 		return AppendLedgerEventResult{}, fmt.Errorf("check client sequence: %w", err)
 	}
 
+	currentSequence := int64(0)
+	currentEvent := ledgerEventVersion{}
+	currentExpenseExists := false
 	var currentExpense Expense
-	currentExpense, err = loadExpenseTx(ctx, tx, normalized.GroupUUID, normalized.EntityUUID)
-	if err != nil && !errors.Is(err, ErrExpenseNotFound) {
-		return AppendLedgerEventResult{}, err
-	}
-	currentExpenseExists := err == nil
-	currentExpenseSequence := int64(0)
-	currentExpenseEvent := ledgerEventVersion{}
-	if currentExpenseExists {
-		currentExpenseSequence = currentExpense.LatestEventSequence
-		currentExpenseEvent, err = findLedgerEventVersionBySequenceTx(ctx, tx, normalized.GroupUUID, currentExpenseSequence)
-		if err != nil {
-			return AppendLedgerEventResult{}, fmt.Errorf("load current expense event: %w", err)
-		}
-	}
 
-	if payload != nil {
-		if err := validateExpenseActorsTx(ctx, tx, normalized.GroupUUID, payload); err != nil {
+	switch normalized.input.EntityType {
+	case "expense":
+		currentExpense, err = loadExpenseTx(ctx, tx, normalized.input.GroupUUID, normalized.input.EntityUUID)
+		if err != nil && !errors.Is(err, ErrExpenseNotFound) {
 			return AppendLedgerEventResult{}, err
 		}
-	}
-	if normalized.EventType == "expense.updated" && !currentExpenseExists {
-		return AppendLedgerEventResult{}, ErrExpenseNotFound
-	}
-	if (normalized.EventType == "expense.voided" || normalized.EventType == "expense.deleted") && !currentExpenseExists {
-		return AppendLedgerEventResult{}, ErrExpenseNotFound
+		currentExpenseExists = err == nil
+		if currentExpenseExists {
+			currentSequence = currentExpense.LatestEventSequence
+		}
+		if normalized.expensePayload != nil {
+			if err := validateExpenseActorsTx(ctx, tx, normalized.input.GroupUUID, normalized.expensePayload); err != nil {
+				return AppendLedgerEventResult{}, err
+			}
+		}
+		if normalized.input.EventType == "expense.updated" && !currentExpenseExists {
+			return AppendLedgerEventResult{}, ErrExpenseNotFound
+		}
+		if (normalized.input.EventType == "expense.voided" || normalized.input.EventType == "expense.deleted") && !currentExpenseExists {
+			return AppendLedgerEventResult{}, ErrExpenseNotFound
+		}
+	case "group":
+		currentSequence = group.LatestMetadataEventSequence
+	case "actor":
+		if normalized.input.EntityUUID == "" {
+			return AppendLedgerEventResult{}, ErrActorNotFound
+		}
+		actor, actorErr := loadActorTx(ctx, tx, normalized.input.GroupUUID, normalized.input.EntityUUID)
+		if actorErr != nil {
+			return AppendLedgerEventResult{}, actorErr
+		}
+		currentSequence = actor.LatestMetadataEventSequence
 	}
 
-	winningEvent := !currentExpenseExists || eventVersionWins(
-		normalized.EventCreatedAt,
-		normalized.EventUUID,
-		currentExpenseEvent.EventCreatedAt,
-		currentExpenseEvent.EventUUID,
+	if currentSequence > 0 {
+		currentEvent, err = findLedgerEventVersionBySequenceTx(ctx, tx, normalized.input.GroupUUID, currentSequence)
+		if err != nil {
+			return AppendLedgerEventResult{}, fmt.Errorf("load current entity event: %w", err)
+		}
+	}
+	if normalized.input.AutoBaseSequence {
+		normalized.input.BaseSequence = currentSequence
+	}
+
+	winningEvent := currentSequence == 0 || eventVersionWins(
+		normalized.input.EventCreatedAt,
+		normalized.input.EventUUID,
+		currentEvent.EventCreatedAt,
+		currentEvent.EventUUID,
 	)
-	hadConflict := normalized.BaseSequence != currentExpenseSequence || (currentExpenseExists && !winningEvent)
+	hadConflict := normalized.input.BaseSequence != currentSequence || (currentSequence > 0 && !winningEvent)
 	nextSequence := currentGroupSequence + 1
 	recordedAt := time.Now().UTC()
 
 	var event LedgerEvent
-	err = tx.QueryRowContext(ctx, `
-		INSERT INTO ledger_events (
-			event_uuid, group_uuid, sequence, entity_type, entity_uuid,
-				event_type, actor_uuid, device_id, client_sequence, base_sequence,
-				event_created_at, had_conflict, payload_version, payload_hash, payload, recorded_at
-			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-			RETURNING event_uuid, group_uuid, sequence, entity_type, entity_uuid,
-				event_type, actor_uuid, device_id, client_sequence, base_sequence,
-				event_created_at, had_conflict, payload_version, payload_hash, payload, recorded_at`,
-		normalized.EventUUID,
-		normalized.GroupUUID,
-		nextSequence,
-		normalized.EntityType,
-		normalized.EntityUUID,
-		normalized.EventType,
-		normalized.ActorUUID,
-		deviceID,
-		normalized.ClientSequence,
-		normalized.BaseSequence,
-		normalized.EventCreatedAt,
-		hadConflict,
-		normalized.PayloadVersion,
-		eventHash[:],
-		normalized.Payload,
-		recordedAt,
-	).Scan(
-		&event.EventUUID,
-		&event.GroupUUID,
-		&event.Sequence,
-		&event.EntityType,
-		&event.EntityUUID,
-		&event.EventType,
-		&event.ActorUUID,
-		&event.DeviceID,
-		&event.ClientSequence,
-		&event.BaseSequence,
-		&event.EventCreatedAt,
-		&event.HadConflict,
-		&event.PayloadVersion,
-		&event.PayloadHash,
-		&event.Payload,
-		&event.RecordedAt,
-	)
+	inserted, err := insertLedgerEventTx(ctx, tx, normalized.input, deviceID, nextSequence, hadConflict, eventHash[:], recordedAt, &event)
 	if err != nil {
-		return AppendLedgerEventResult{}, fmt.Errorf("insert ledger event: %w", err)
+		return AppendLedgerEventResult{}, err
 	}
-	event.PayloadHash = append([]byte(nil), eventHash[:]...)
+	if !inserted {
+		existingEvent, lookupErr := findLedgerEventByUUIDTx(ctx, tx, normalized.input.EventUUID)
+		if lookupErr == nil {
+			if normalized.input.AutoActorUUID {
+				normalized.input.ActorUUID = existingEvent.ActorUUID
+			}
+			if normalized.input.AutoEventCreatedAt {
+				normalized.input.EventCreatedAt = existingEvent.EventCreatedAt
+			}
+			if normalized.input.AutoClientSequence {
+				normalized.input.ClientSequence = existingEvent.ClientSequence
+			}
+			if normalized.input.AutoBaseSequence {
+				normalized.input.BaseSequence = existingEvent.BaseSequence
+			}
+			if !ledgerEventsEqual(existingEvent, normalized.input, deviceID, eventHash[:]) {
+				return AppendLedgerEventResult{}, ErrLedgerEventConflict
+			}
+			return replayLedgerEventTx(ctx, tx, existingEvent)
+		}
+		if !errors.Is(lookupErr, sql.ErrNoRows) {
+			return AppendLedgerEventResult{}, fmt.Errorf("check concurrent ledger event: %w", lookupErr)
+		}
+
+		existingSequenceEvent, lookupErr := findLedgerEventByClientSequenceTx(ctx, tx, deviceID, normalized.input.ClientSequence)
+		if lookupErr == nil {
+			return AppendLedgerEventResult{}, fmt.Errorf("%w: %s", ErrClientSequenceConflict, existingSequenceEvent.EventUUID)
+		}
+		if !errors.Is(lookupErr, sql.ErrNoRows) {
+			return AppendLedgerEventResult{}, fmt.Errorf("check concurrent client sequence: %w", lookupErr)
+		}
+		return AppendLedgerEventResult{}, fmt.Errorf("insert ledger event was skipped without a duplicate")
+	}
 
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE groups
 		SET latest_event_sequence = $2
-		WHERE uuid = $1`, normalized.GroupUUID, nextSequence); err != nil {
+		WHERE uuid = $1`, normalized.input.GroupUUID, nextSequence); err != nil {
 		return AppendLedgerEventResult{}, fmt.Errorf("advance group ledger sequence: %w", err)
 	}
 
-	var expense *Expense
-	switch normalized.EventType {
-	case "expense.upsert", "expense.created", "expense.updated":
+	result := AppendLedgerEventResult{
+		Event:    event,
+		Applied:  winningEvent,
+		Conflict: hadConflict,
+	}
+	switch normalized.input.EntityType {
+	case "expense":
+		switch normalized.input.EventType {
+		case "expense.upsert", "expense.created", "expense.updated":
+			if winningEvent {
+				if err := applyExpenseUpsertTx(ctx, tx, event, *normalized.expensePayload); err != nil {
+					return AppendLedgerEventResult{}, err
+				}
+			}
+		case "expense.voided", "expense.deleted":
+			if winningEvent {
+				if err := applyExpenseVoidedTx(ctx, tx, event); err != nil {
+					return AppendLedgerEventResult{}, err
+				}
+			}
+		}
+		current, err := loadExpenseTx(ctx, tx, normalized.input.GroupUUID, normalized.input.EntityUUID)
+		if err != nil {
+			return AppendLedgerEventResult{}, err
+		}
+		result.Expense = &current
+	case "group":
 		if winningEvent {
-			if err := applyExpenseUpsertTx(ctx, tx, event, *payload); err != nil {
+			if err := applyGroupNameTx(ctx, tx, event, *normalized.groupNamePayload); err != nil {
 				return AppendLedgerEventResult{}, err
 			}
 		}
-	case "expense.voided", "expense.deleted":
+		current, err := loadGroupTx(ctx, tx, normalized.input.GroupUUID)
+		if err != nil {
+			return AppendLedgerEventResult{}, err
+		}
+		result.Group = &current
+	case "actor":
 		if winningEvent {
-			if err := applyExpenseVoidedTx(ctx, tx, event); err != nil {
+			if err := applyActorDisplayNameTx(ctx, tx, event, *normalized.actorDisplayNamePayload); err != nil {
 				return AppendLedgerEventResult{}, err
 			}
 		}
-	default:
-		return AppendLedgerEventResult{}, fmt.Errorf("%w: %s", ErrUnsupportedEvent, normalized.EventType)
+		current, err := loadActorTx(ctx, tx, normalized.input.GroupUUID, normalized.input.EntityUUID)
+		if err != nil {
+			return AppendLedgerEventResult{}, err
+		}
+		result.Actor = &current
 	}
-
-	current, err := loadExpenseTx(ctx, tx, normalized.GroupUUID, normalized.EntityUUID)
-	if err != nil {
-		return AppendLedgerEventResult{}, err
-	}
-	expense = &current
 
 	if err := tx.Commit(); err != nil {
 		return AppendLedgerEventResult{}, fmt.Errorf("commit ledger event transaction: %w", err)
 	}
 
-	return AppendLedgerEventResult{
+	return result, nil
+}
+
+func insertLedgerEventTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	input LedgerEventInput,
+	deviceID string,
+	sequence int64,
+	hadConflict bool,
+	payloadHash []byte,
+	recordedAt time.Time,
+	event *LedgerEvent,
+) (bool, error) {
+	err := scanLedgerEvent(tx.QueryRowContext(ctx, `
+		INSERT INTO ledger_events (
+			event_uuid, group_uuid, sequence, entity_type, entity_uuid,
+			event_type, actor_uuid, device_id, client_sequence, base_sequence,
+			event_created_at, had_conflict, payload_version, payload_hash, payload, recorded_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+		ON CONFLICT DO NOTHING
+		RETURNING event_uuid, group_uuid, sequence, entity_type, entity_uuid,
+			event_type, actor_uuid, device_id, client_sequence, base_sequence,
+			event_created_at, had_conflict, payload_version, payload_hash, payload, recorded_at`,
+		input.EventUUID,
+		input.GroupUUID,
+		sequence,
+		input.EntityType,
+		input.EntityUUID,
+		input.EventType,
+		input.ActorUUID,
+		deviceID,
+		input.ClientSequence,
+		input.BaseSequence,
+		input.EventCreatedAt,
+		hadConflict,
+		input.PayloadVersion,
+		payloadHash,
+		input.Payload,
+		recordedAt,
+	), event)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("insert ledger event: %w", err)
+	}
+	event.PayloadHash = append([]byte(nil), payloadHash...)
+	return true, nil
+}
+
+func replayLedgerEventTx(ctx context.Context, tx *sql.Tx, event LedgerEvent) (AppendLedgerEventResult, error) {
+	result := AppendLedgerEventResult{
 		Event:    event,
-		Expense:  expense,
-		Applied:  winningEvent,
-		Conflict: hadConflict,
-	}, nil
+		Conflict: event.HadConflict,
+		Replayed: true,
+	}
+
+	switch event.EntityType {
+	case "expense":
+		expense, err := loadExpenseTx(ctx, tx, event.GroupUUID, event.EntityUUID)
+		if err != nil {
+			return AppendLedgerEventResult{}, err
+		}
+		result.Expense = &expense
+		result.Applied = expense.LatestEventSequence == event.Sequence
+	case "group":
+		group, err := loadGroupTx(ctx, tx, event.GroupUUID)
+		if err != nil {
+			return AppendLedgerEventResult{}, err
+		}
+		result.Group = &group
+		result.Applied = group.LatestMetadataEventSequence == event.Sequence
+	case "actor":
+		actor, err := loadActorTx(ctx, tx, event.GroupUUID, event.EntityUUID)
+		if err != nil {
+			return AppendLedgerEventResult{}, err
+		}
+		result.Actor = &actor
+		result.Applied = actor.LatestMetadataEventSequence == event.Sequence
+	}
+
+	return result, nil
 }
 
 func (database *Database) ListExpensesForDevice(ctx context.Context, groupUUID, deviceID string) ([]Expense, error) {
@@ -501,79 +663,127 @@ func (database *Database) ListLedgerEventsForDevice(ctx context.Context, groupUU
 	}, nil
 }
 
-func normalizeLedgerEvent(input LedgerEventInput) (LedgerEventInput, *ExpenseEventPayload, error) {
+func normalizeLedgerEvent(input LedgerEventInput) (normalizedLedgerEvent, error) {
 	var err error
 	input.EventUUID, err = normalizeUUID(input.EventUUID, "event_uuid")
 	if err != nil {
-		return LedgerEventInput{}, nil, fmt.Errorf("%w: %v", ErrInvalidExpensePayload, err)
+		return normalizedLedgerEvent{}, fmt.Errorf("%w: %v", ErrInvalidExpensePayload, err)
 	}
 	input.GroupUUID, err = normalizeUUID(input.GroupUUID, "group_uuid")
 	if err != nil {
-		return LedgerEventInput{}, nil, fmt.Errorf("%w: %v", ErrInvalidExpensePayload, err)
+		return normalizedLedgerEvent{}, fmt.Errorf("%w: %v", ErrInvalidExpensePayload, err)
 	}
 	input.EntityUUID, err = normalizeUUID(input.EntityUUID, "entity_uuid")
 	if err != nil {
-		return LedgerEventInput{}, nil, fmt.Errorf("%w: %v", ErrInvalidExpensePayload, err)
+		return normalizedLedgerEvent{}, fmt.Errorf("%w: %v", ErrInvalidExpensePayload, err)
 	}
-	input.ActorUUID, err = normalizeUUID(input.ActorUUID, "actor_uuid")
-	if err != nil {
-		return LedgerEventInput{}, nil, fmt.Errorf("%w: %v", ErrInvalidExpensePayload, err)
+	if !(input.AutoActorUUID && strings.TrimSpace(input.ActorUUID) == "") {
+		input.ActorUUID, err = normalizeUUID(input.ActorUUID, "actor_uuid")
+		if err != nil {
+			return normalizedLedgerEvent{}, fmt.Errorf("%w: %v", ErrInvalidExpensePayload, err)
+		}
 	}
-	if input.EventCreatedAt.IsZero() {
-		return LedgerEventInput{}, nil, fmt.Errorf("%w: event_created_at is required", ErrInvalidExpensePayload)
+	if input.EventCreatedAt.IsZero() && !input.AutoEventCreatedAt {
+		return normalizedLedgerEvent{}, fmt.Errorf("%w: event_created_at is required", ErrInvalidExpensePayload)
 	}
-	input.EventCreatedAt = input.EventCreatedAt.UTC().Truncate(time.Microsecond)
+	if !input.EventCreatedAt.IsZero() {
+		input.EventCreatedAt = input.EventCreatedAt.UTC().Truncate(time.Microsecond)
+	}
 	input.EntityType = strings.ToLower(strings.TrimSpace(input.EntityType))
-	if input.EntityType != "expense" {
-		return LedgerEventInput{}, nil, fmt.Errorf("%w: entity_type %q", ErrUnsupportedEvent, input.EntityType)
+	if input.EntityType != "expense" && input.EntityType != "group" && input.EntityType != "actor" {
+		return normalizedLedgerEvent{}, fmt.Errorf("%w: entity_type %q", ErrUnsupportedEvent, input.EntityType)
 	}
 	input.EventType = strings.ToLower(strings.TrimSpace(input.EventType))
 	if input.EventType == "" {
-		return LedgerEventInput{}, nil, fmt.Errorf("%w: event_type is required", ErrInvalidExpensePayload)
+		return normalizedLedgerEvent{}, fmt.Errorf("%w: event_type is required", ErrInvalidExpensePayload)
 	}
 	if input.ClientSequence < 0 {
-		return LedgerEventInput{}, nil, fmt.Errorf("%w: client_sequence must be non-negative", ErrInvalidExpensePayload)
+		return normalizedLedgerEvent{}, fmt.Errorf("%w: client_sequence must be non-negative", ErrInvalidExpensePayload)
 	}
 	if input.BaseSequence < 0 {
-		return LedgerEventInput{}, nil, fmt.Errorf("%w: base_sequence must be non-negative", ErrInvalidExpensePayload)
+		return normalizedLedgerEvent{}, fmt.Errorf("%w: base_sequence must be non-negative", ErrInvalidExpensePayload)
 	}
 	if input.PayloadVersion == 0 {
 		input.PayloadVersion = 1
 	}
 	if input.PayloadVersion != 1 {
-		return LedgerEventInput{}, nil, fmt.Errorf("%w: payload_version %d", ErrUnsupportedEvent, input.PayloadVersion)
+		return normalizedLedgerEvent{}, fmt.Errorf("%w: payload_version %d", ErrUnsupportedEvent, input.PayloadVersion)
 	}
 
-	switch input.EventType {
-	case "expense.upsert", "expense.created", "expense.updated":
-		if len(input.Payload) == 0 {
-			return LedgerEventInput{}, nil, fmt.Errorf("%w: payload is required", ErrInvalidExpensePayload)
+	normalized := normalizedLedgerEvent{input: input}
+	switch input.EntityType {
+	case "expense":
+		switch input.EventType {
+		case "expense.upsert", "expense.created", "expense.updated":
+			if len(input.Payload) == 0 {
+				return normalizedLedgerEvent{}, fmt.Errorf("%w: payload is required", ErrInvalidExpensePayload)
+			}
+			var payload ExpenseEventPayload
+			if err := json.Unmarshal(input.Payload, &payload); err != nil {
+				return normalizedLedgerEvent{}, fmt.Errorf("%w: decode payload: %v", ErrInvalidExpensePayload, err)
+			}
+			if err := normalizeExpensePayload(&payload); err != nil {
+				return normalizedLedgerEvent{}, err
+			}
+			canonicalPayload, err := json.Marshal(payload)
+			if err != nil {
+				return normalizedLedgerEvent{}, fmt.Errorf("%w: encode payload: %v", ErrInvalidExpensePayload, err)
+			}
+			normalized.input.Payload = canonicalPayload
+			normalized.expensePayload = &payload
+		case "expense.voided", "expense.deleted":
+			if len(input.Payload) > 0 {
+				var object map[string]json.RawMessage
+				if err := json.Unmarshal(input.Payload, &object); err != nil || object == nil {
+					return normalizedLedgerEvent{}, fmt.Errorf("%w: void event payload must be a JSON object", ErrInvalidExpensePayload)
+				}
+			}
+			normalized.input.Payload = json.RawMessage(`{}`)
+		default:
+			return normalizedLedgerEvent{}, fmt.Errorf("%w: event_type %q", ErrUnsupportedEvent, input.EventType)
 		}
-		var payload ExpenseEventPayload
+	case "group":
+		if input.EntityUUID != input.GroupUUID {
+			return normalizedLedgerEvent{}, fmt.Errorf("%w: group metadata entity_uuid must equal group_uuid", ErrInvalidExpensePayload)
+		}
+		if input.EventType != "group.name_updated" {
+			return normalizedLedgerEvent{}, fmt.Errorf("%w: event_type %q", ErrUnsupportedEvent, input.EventType)
+		}
+		var payload GroupNameEventPayload
 		if err := json.Unmarshal(input.Payload, &payload); err != nil {
-			return LedgerEventInput{}, nil, fmt.Errorf("%w: decode payload: %v", ErrInvalidExpensePayload, err)
+			return normalizedLedgerEvent{}, fmt.Errorf("%w: decode group metadata payload: %v", ErrInvalidExpensePayload, err)
 		}
-		if err := normalizeExpensePayload(&payload); err != nil {
-			return LedgerEventInput{}, nil, err
+		payload.Name, err = NormalizeGroupName(payload.Name)
+		if err != nil {
+			return normalizedLedgerEvent{}, fmt.Errorf("%w: %v", ErrInvalidExpensePayload, err)
 		}
 		canonicalPayload, err := json.Marshal(payload)
 		if err != nil {
-			return LedgerEventInput{}, nil, fmt.Errorf("%w: encode payload: %v", ErrInvalidExpensePayload, err)
+			return normalizedLedgerEvent{}, fmt.Errorf("%w: encode group metadata payload: %v", ErrInvalidExpensePayload, err)
 		}
-		input.Payload = canonicalPayload
-		return input, &payload, nil
-	case "expense.voided", "expense.deleted":
-		if len(input.Payload) > 0 {
-			var object map[string]json.RawMessage
-			if err := json.Unmarshal(input.Payload, &object); err != nil || object == nil {
-				return LedgerEventInput{}, nil, fmt.Errorf("%w: void event payload must be a JSON object", ErrInvalidExpensePayload)
-			}
+		normalized.input.Payload = canonicalPayload
+		normalized.groupNamePayload = &payload
+	case "actor":
+		if input.EventType != "actor.display_name_updated" {
+			return normalizedLedgerEvent{}, fmt.Errorf("%w: event_type %q", ErrUnsupportedEvent, input.EventType)
 		}
-		input.Payload = json.RawMessage(`{}`)
-		return input, nil, nil
-	default:
-		return LedgerEventInput{}, nil, fmt.Errorf("%w: event_type %q", ErrUnsupportedEvent, input.EventType)
+		var payload ActorDisplayNameEventPayload
+		if err := json.Unmarshal(input.Payload, &payload); err != nil {
+			return normalizedLedgerEvent{}, fmt.Errorf("%w: decode actor metadata payload: %v", ErrInvalidExpensePayload, err)
+		}
+		payload.DisplayName, err = NormalizeDisplayName(payload.DisplayName)
+		if err != nil {
+			return normalizedLedgerEvent{}, fmt.Errorf("%w: %v", ErrInvalidExpensePayload, err)
+		}
+		canonicalPayload, err := json.Marshal(payload)
+		if err != nil {
+			return normalizedLedgerEvent{}, fmt.Errorf("%w: encode actor metadata payload: %v", ErrInvalidExpensePayload, err)
+		}
+		normalized.input.Payload = canonicalPayload
+		normalized.actorDisplayNamePayload = &payload
 	}
+
+	return normalized, nil
 }
 
 func normalizeExpensePayload(payload *ExpenseEventPayload) error {
@@ -696,6 +906,46 @@ func validateExpenseActorsTx(ctx context.Context, tx *sql.Tx, groupUUID string, 
 	return nil
 }
 
+func applyGroupNameTx(ctx context.Context, tx *sql.Tx, event LedgerEvent, payload GroupNameEventPayload) error {
+	result, err := tx.ExecContext(ctx, `
+		UPDATE groups
+		SET name = $2,
+			latest_metadata_event_sequence = $3
+		WHERE uuid = $1`, event.EntityUUID, payload.Name, event.Sequence)
+	if err != nil {
+		return fmt.Errorf("update group metadata projection: %w", err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check group metadata projection: %w", err)
+	}
+	if rowsAffected == 0 {
+		return ErrGroupNotFound
+	}
+	return nil
+}
+
+func applyActorDisplayNameTx(ctx context.Context, tx *sql.Tx, event LedgerEvent, payload ActorDisplayNameEventPayload) error {
+	result, err := tx.ExecContext(ctx, `
+		UPDATE group_actors
+		SET display_name = $3,
+			latest_metadata_event_sequence = $4
+		WHERE group_uuid = $1
+			AND actor_uuid = $2
+			AND archived_at IS NULL`, event.GroupUUID, event.EntityUUID, payload.DisplayName, event.Sequence)
+	if err != nil {
+		return fmt.Errorf("update actor metadata projection: %w", err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check actor metadata projection: %w", err)
+	}
+	if rowsAffected == 0 {
+		return ErrActorNotFound
+	}
+	return nil
+}
+
 func applyExpenseUpsertTx(ctx context.Context, tx *sql.Tx, event LedgerEvent, payload ExpenseEventPayload) error {
 	_, err := loadExpenseTx(ctx, tx, event.GroupUUID, event.EntityUUID)
 	if err != nil && !errors.Is(err, ErrExpenseNotFound) {
@@ -795,6 +1045,50 @@ func applyExpenseVoidedTx(ctx context.Context, tx *sql.Tx, event LedgerEvent) er
 		return ErrExpenseNotFound
 	}
 	return nil
+}
+
+func loadGroupTx(ctx context.Context, tx *sql.Tx, groupUUID string) (Group, error) {
+	var group Group
+	err := tx.QueryRowContext(ctx, `
+		SELECT uuid, name, creation_date, join_code, latest_event_sequence,
+			latest_metadata_event_sequence
+		FROM groups
+		WHERE uuid = $1`, groupUUID).Scan(
+		&group.UUID,
+		&group.Name,
+		&group.CreationDate,
+		&group.JoinCode,
+		&group.LatestEventSequence,
+		&group.LatestMetadataEventSequence,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Group{}, ErrGroupNotFound
+	}
+	if err != nil {
+		return Group{}, fmt.Errorf("load group: %w", err)
+	}
+	return group, nil
+}
+
+func loadActorTx(ctx context.Context, tx *sql.Tx, groupUUID, actorUUID string) (GroupActor, error) {
+	var actor GroupActor
+	err := tx.QueryRowContext(ctx, `
+		SELECT actor_uuid, COALESCE(display_name, ''), latest_metadata_event_sequence
+		FROM group_actors
+		WHERE group_uuid = $1
+			AND actor_uuid = $2
+			AND archived_at IS NULL`, groupUUID, actorUUID).Scan(
+		&actor.ActorUUID,
+		&actor.DisplayName,
+		&actor.LatestMetadataEventSequence,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return GroupActor{}, ErrActorNotFound
+	}
+	if err != nil {
+		return GroupActor{}, fmt.Errorf("load actor: %w", err)
+	}
+	return actor, nil
 }
 
 func loadExpenseTx(ctx context.Context, tx *sql.Tx, groupUUID, expenseUUID string) (Expense, error) {
@@ -908,6 +1202,47 @@ func activeActorDeviceBindingTx(ctx context.Context, tx *sql.Tx, groupUUID, acto
 				AND actor.archived_at IS NULL
 		)`, groupUUID, actorUUID, deviceID).Scan(&exists)
 	return exists, err
+}
+
+func activeActorUUIDForDeviceTx(ctx context.Context, tx *sql.Tx, groupUUID, deviceID string) (string, error) {
+	var actorUUID string
+	err := tx.QueryRowContext(ctx, `
+		SELECT binding.actor_uuid
+		FROM actor_device_bindings AS binding
+		JOIN group_actors AS actor
+			ON actor.group_uuid = binding.group_uuid
+			AND actor.actor_uuid = binding.actor_uuid
+		WHERE binding.group_uuid = $1
+			AND binding.device_id = $2
+			AND binding.unbound_at IS NULL
+			AND actor.archived_at IS NULL`, groupUUID, deviceID).Scan(&actorUUID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrActorNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("load active actor for device: %w", err)
+	}
+	return actorUUID, nil
+}
+
+func nextClientSequenceTx(ctx context.Context, tx *sql.Tx, deviceID string) (int64, error) {
+	var lockedDeviceID string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT device_id
+		FROM devices
+		WHERE device_id = $1
+		FOR UPDATE`, deviceID).Scan(&lockedDeviceID); err != nil {
+		return 0, fmt.Errorf("lock device for client sequence: %w", err)
+	}
+
+	var nextSequence int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(client_sequence), -1) + 1
+		FROM ledger_events
+		WHERE device_id = $1`, lockedDeviceID).Scan(&nextSequence); err != nil {
+		return 0, fmt.Errorf("allocate client sequence: %w", err)
+	}
+	return nextSequence, nil
 }
 
 func findLedgerEventByUUIDTx(ctx context.Context, tx *sql.Tx, eventUUID string) (LedgerEvent, error) {

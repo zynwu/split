@@ -80,13 +80,16 @@ Update an active actor's name within a group with:
 curl -X PATCH "http://localhost:8080/api/groups/<group-uuid>/actors/<actor-uuid>" \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer <auth_token-from-register>' \
+  -H 'Idempotency-Key: <request-uuid>' \
   -d '{"display_name":"Alice W."}'
 ```
 
-The response contains the updated `actor_uuid` and `display_name`. Any active
-member of the group may rename an active actor under the current trusted-group
-model. Group actor names are server-backed and are returned by the groups and
-balances APIs.
+The response contains the updated `actor_uuid`, `display_name`, and metadata
+version. Any active member of the group may rename an active actor under the
+current trusted-group model. Group actor names are server-backed and are
+returned by the groups and balances APIs. The change is recorded as an
+`actor.display_name_updated` ledger event. Reuse the same UUID in
+`Idempotency-Key` if a PATCH response is lost and the request must be retried.
 
 Update a group's name with:
 
@@ -94,14 +97,15 @@ Update a group's name with:
 curl -X PATCH "http://localhost:8080/api/groups/<group-uuid>" \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer <auth_token-from-register>' \
+  -H 'Idempotency-Key: <request-uuid>' \
   -d '{"name":"Updated group name"}'
 ```
 
 The response contains the updated group metadata, including its `uuid`, `name`,
-`creation_date`, `join_code`, and `latest_event_sequence`. An active member is
-required. This metadata update does not create an expense ledger event or
-change the group's expense sequence; clients should refresh group metadata when
-syncing.
+`creation_date`, `join_code`, `latest_event_sequence`, and
+`latest_metadata_event_sequence`. An active member is required. This change is
+recorded as a `group.name_updated` ledger event. Reuse the same UUID in
+`Idempotency-Key` if a PATCH response is lost and the request must be retried.
 
 `POST /api/register` and `GET /api/healthz` are public. Other current API routes
 require the bearer token. The server stores only a hash of the token; whoever
@@ -109,10 +113,20 @@ possesses the token can act as that device, so it must be kept private.
 
 ### Expense ledger
 
-Expenses are written as immutable ledger events and read from the server's
-materialized `expenses` projection. An event can be retried safely: resend the
-same `event_uuid` and `client_sequence` after a network failure instead of
-creating a new event.
+Expenses and group metadata are written as immutable ledger events and read
+from materialized projections. An event can be retried safely: resend the same
+`event_uuid` and `client_sequence` after a network failure instead of creating
+a second event. The server returns `replayed:true` for a duplicate of the same
+event and returns the canonical current projection with the response.
+
+The generic events endpoint accepts `expense.created`, `expense.updated`,
+`expense.voided`, `group.name_updated`, and `actor.display_name_updated` events.
+Group-name events return a `group` projection and actor-name events return an
+`actor` projection. Metadata projections use their own
+`latest_metadata_event_sequence` version, so an expense edit cannot overwrite
+a name change. If two offline edits target the same projection, the event with
+the later client `event_created_at` wins; the other event is retained with
+`applied:false` and `conflict:true`.
 
 Create an expense with `POST /api/groups/<group-uuid>/events`:
 

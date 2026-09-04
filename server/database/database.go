@@ -14,16 +14,18 @@ type Database struct {
 }
 
 type Group struct {
-	UUID                string    `json:"uuid"`
-	Name                string    `json:"name"`
-	CreationDate        time.Time `json:"creation_date"`
-	JoinCode            string    `json:"join_code"`
-	LatestEventSequence int64     `json:"latest_event_sequence"`
+	UUID                        string    `json:"uuid"`
+	Name                        string    `json:"name"`
+	CreationDate                time.Time `json:"creation_date"`
+	JoinCode                    string    `json:"join_code"`
+	LatestEventSequence         int64     `json:"latest_event_sequence"`
+	LatestMetadataEventSequence int64     `json:"latest_metadata_event_sequence"`
 }
 
 type GroupActor struct {
-	ActorUUID   string `json:"actor_uuid"`
-	DisplayName string `json:"display_name"`
+	ActorUUID                   string `json:"actor_uuid"`
+	DisplayName                 string `json:"display_name"`
+	LatestMetadataEventSequence int64  `json:"latest_metadata_event_sequence"`
 }
 
 type GroupMembership struct {

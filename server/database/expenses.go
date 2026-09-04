@@ -29,12 +29,14 @@ var (
 type ExpenseSplit struct {
 	ActorUUID        string `json:"actor_uuid"`
 	AmountMinorUnits int64  `json:"amount_minor_units"`
+	DeviceID         string `json:"device_id,omitempty"`
 }
 
 type Expense struct {
 	UUID                string          `json:"uuid"`
 	GroupUUID           string          `json:"group_uuid"`
 	CreatedByActorUUID  string          `json:"created_by_actor_uuid"`
+	CreatedByDeviceID   string          `json:"created_by_device_id"`
 	PayerActorUUID      string          `json:"payer_actor_uuid"`
 	Name                string          `json:"name"`
 	Description         string          `json:"description"`
@@ -190,20 +192,31 @@ func (database *Database) AppendLedgerEvent(ctx context.Context, deviceID string
 		return AppendLedgerEventResult{}, ErrGroupMembershipDenied
 	}
 
+	projectionActorUUID := normalized.input.ActorUUID
 	actorExists, err := activeActorTx(ctx, tx, normalized.input.GroupUUID, normalized.input.ActorUUID)
 	if err != nil {
 		return AppendLedgerEventResult{}, fmt.Errorf("check event actor: %w", err)
 	}
 	if !actorExists {
-		return AppendLedgerEventResult{}, ErrActorNotFound
-	}
-
-	actorBound, err := activeActorDeviceBindingTx(ctx, tx, normalized.input.GroupUUID, normalized.input.ActorUUID, deviceID)
-	if err != nil {
-		return AppendLedgerEventResult{}, fmt.Errorf("check event actor device binding: %w", err)
-	}
-	if !actorBound {
-		return AppendLedgerEventResult{}, ErrActorDeviceMismatch
+		mergedBinding, mergeErr := mergedActorWasBoundToDeviceTx(ctx, tx, normalized.input.GroupUUID, normalized.input.ActorUUID, deviceID)
+		if mergeErr != nil {
+			return AppendLedgerEventResult{}, fmt.Errorf("check historical event actor binding: %w", mergeErr)
+		}
+		if !mergedBinding {
+			return AppendLedgerEventResult{}, ErrActorNotFound
+		}
+		projectionActorUUID, err = resolveActorUUIDTx(ctx, tx, normalized.input.GroupUUID, normalized.input.ActorUUID)
+		if err != nil {
+			return AppendLedgerEventResult{}, err
+		}
+	} else {
+		actorBound, bindingErr := activeActorDeviceBindingTx(ctx, tx, normalized.input.GroupUUID, normalized.input.ActorUUID, deviceID)
+		if bindingErr != nil {
+			return AppendLedgerEventResult{}, fmt.Errorf("check event actor device binding: %w", bindingErr)
+		}
+		if !actorBound {
+			return AppendLedgerEventResult{}, ErrActorDeviceMismatch
+		}
 	}
 
 	existingEvent, err := findLedgerEventByUUIDTx(ctx, tx, normalized.input.EventUUID)
@@ -374,12 +387,14 @@ func (database *Database) AppendLedgerEvent(ctx context.Context, deviceID string
 		Applied:  winningEvent,
 		Conflict: hadConflict,
 	}
+	projectionEvent := event
+	projectionEvent.ActorUUID = projectionActorUUID
 	switch normalized.input.EntityType {
 	case "expense":
 		switch normalized.input.EventType {
 		case "expense.upsert", "expense.created", "expense.updated":
 			if winningEvent {
-				if err := applyExpenseUpsertTx(ctx, tx, event, *normalized.expensePayload); err != nil {
+				if err := applyExpenseUpsertTx(ctx, tx, projectionEvent, *normalized.expensePayload); err != nil {
 					return AppendLedgerEventResult{}, err
 				}
 			}
@@ -399,7 +414,7 @@ func (database *Database) AppendLedgerEvent(ctx context.Context, deviceID string
 		switch normalized.input.EventType {
 		case "payment.upsert", "payment.created", "payment.updated":
 			if winningEvent {
-				if err := applyPaymentUpsertTx(ctx, tx, event, *normalized.paymentPayload); err != nil {
+				if err := applyPaymentUpsertTx(ctx, tx, projectionEvent, *normalized.paymentPayload); err != nil {
 					return AppendLedgerEventResult{}, err
 				}
 			}
@@ -552,7 +567,8 @@ func (database *Database) ListExpensesForDevice(ctx context.Context, groupUUID, 
 
 	const query = `
 		SELECT e.expense_uuid, e.group_uuid, e.created_by_actor_uuid,
-			e.payer_actor_uuid, e.name, e.description, e.currency_code,
+			e.created_by_device_id, e.payer_actor_uuid,
+			e.name, e.description, e.currency_code,
 			e.total_minor_units, e.split_method, e.split_config,
 			e.occurred_at, e.created_at, e.updated_at,
 			e.latest_event_sequence, e.voided_at,
@@ -560,7 +576,8 @@ func (database *Database) ListExpensesForDevice(ctx context.Context, groupUUID, 
 				jsonb_agg(
 					jsonb_build_object(
 						'actor_uuid', s.actor_uuid,
-						'amount_minor_units', s.amount_minor_units
+						'amount_minor_units', s.amount_minor_units,
+						'device_id', s.device_id
 					)
 					ORDER BY s.actor_uuid
 				) FILTER (WHERE s.actor_uuid IS NOT NULL),
@@ -572,7 +589,8 @@ func (database *Database) ListExpensesForDevice(ctx context.Context, groupUUID, 
 			AND s.expense_uuid = e.expense_uuid
 		WHERE e.group_uuid = $1
 		GROUP BY e.expense_uuid, e.group_uuid, e.created_by_actor_uuid,
-			e.payer_actor_uuid, e.name, e.description, e.currency_code,
+			e.created_by_device_id, e.payer_actor_uuid,
+			e.name, e.description, e.currency_code,
 			e.total_minor_units, e.split_method, e.split_config,
 			e.occurred_at, e.created_at, e.updated_at,
 			e.latest_event_sequence, e.voided_at
@@ -593,6 +611,7 @@ func (database *Database) ListExpensesForDevice(ctx context.Context, groupUUID, 
 			&expense.UUID,
 			&expense.GroupUUID,
 			&expense.CreatedByActorUUID,
+			&expense.CreatedByDeviceID,
 			&expense.PayerActorUUID,
 			&expense.Name,
 			&expense.Description,
@@ -924,6 +943,9 @@ func normalizeExpensePayload(payload *ExpenseEventPayload) error {
 		}
 		seenActors[actorUUID] = struct{}{}
 		payload.Splits[index].ActorUUID = actorUUID
+		// The server records the authenticated event device. A client cannot
+		// select provenance by putting a device_id in the expense payload.
+		payload.Splits[index].DeviceID = ""
 		if payload.SplitMethod == "manual" && payload.Splits[index].AmountMinorUnits < 0 {
 			return fmt.Errorf("%w: split amounts must be non-negative", ErrInvalidExpensePayload)
 		}
@@ -962,26 +984,35 @@ func normalizeExpensePayload(payload *ExpenseEventPayload) error {
 }
 
 func validateExpenseActorsTx(ctx context.Context, tx *sql.Tx, groupUUID string, payload *ExpenseEventPayload) error {
-	actors := make([]string, 0, len(payload.Splits)+1)
-	actors = append(actors, payload.PayerActorUUID)
-	for _, split := range payload.Splits {
-		actors = append(actors, split.ActorUUID)
+	resolvedPayerActorUUID, err := resolveActorUUIDTx(ctx, tx, groupUUID, payload.PayerActorUUID)
+	if err != nil {
+		return fmt.Errorf("check expense payer actor: %w", err)
 	}
+	payload.PayerActorUUID = resolvedPayerActorUUID
 
-	seen := make(map[string]struct{}, len(actors))
-	for _, actorUUID := range actors {
-		if _, exists := seen[actorUUID]; exists {
+	resolvedSplits := make([]ExpenseSplit, 0, len(payload.Splits))
+	splitIndexes := make(map[string]int, len(payload.Splits))
+	for _, split := range payload.Splits {
+		resolvedActorUUID, err := resolveActorUUIDTx(ctx, tx, groupUUID, split.ActorUUID)
+		if err != nil {
+			return fmt.Errorf("check expense split actor: %w", err)
+		}
+		if splitIndex, exists := splitIndexes[resolvedActorUUID]; exists {
+			combinedAmount, err := addInt64(resolvedSplits[splitIndex].AmountMinorUnits, split.AmountMinorUnits)
+			if err != nil {
+				return fmt.Errorf("combine expense split amounts: %w", err)
+			}
+			resolvedSplits[splitIndex].AmountMinorUnits = combinedAmount
 			continue
 		}
-		seen[actorUUID] = struct{}{}
-		active, err := activeActorTx(ctx, tx, groupUUID, actorUUID)
-		if err != nil {
-			return fmt.Errorf("check expense actor: %w", err)
-		}
-		if !active {
-			return fmt.Errorf("%w: %s", ErrActorNotFound, actorUUID)
-		}
+		split.ActorUUID = resolvedActorUUID
+		resolvedSplits = append(resolvedSplits, split)
+		splitIndexes[resolvedActorUUID] = len(resolvedSplits) - 1
 	}
+	sort.Slice(resolvedSplits, func(i, j int) bool {
+		return resolvedSplits[i].ActorUUID < resolvedSplits[j].ActorUUID
+	})
+	payload.Splits = resolvedSplits
 	return nil
 }
 
@@ -1034,15 +1065,17 @@ func applyExpenseUpsertTx(ctx context.Context, tx *sql.Tx, event LedgerEvent, pa
 	if errors.Is(err, ErrExpenseNotFound) {
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO expenses (
-				expense_uuid, group_uuid, created_by_actor_uuid, payer_actor_uuid,
+				expense_uuid, group_uuid, created_by_actor_uuid, created_by_device_id,
+				payer_actor_uuid,
 				name, description, currency_code, total_minor_units, split_method,
 				split_config, occurred_at, created_at, updated_at,
 				latest_event_sequence, voided_at
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12, $13, NULL)`,
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $14, NULL)`,
 			event.EntityUUID,
 			event.GroupUUID,
 			event.ActorUUID,
+			event.DeviceID,
 			payload.PayerActorUUID,
 			payload.Name,
 			payload.Description,
@@ -1097,8 +1130,8 @@ func applyExpenseUpsertTx(ctx context.Context, tx *sql.Tx, event LedgerEvent, pa
 	}
 	for _, split := range payload.Splits {
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO expense_splits (group_uuid, expense_uuid, actor_uuid, amount_minor_units)
-			VALUES ($1, $2, $3, $4)`, event.GroupUUID, event.EntityUUID, split.ActorUUID, split.AmountMinorUnits); err != nil {
+			INSERT INTO expense_splits (group_uuid, expense_uuid, actor_uuid, amount_minor_units, device_id)
+			VALUES ($1, $2, $3, $4, $5)`, event.GroupUUID, event.EntityUUID, split.ActorUUID, split.AmountMinorUnits, event.DeviceID); err != nil {
 			return fmt.Errorf("insert expense split: %w", err)
 		}
 	}
@@ -1179,8 +1212,9 @@ func loadExpense(ctx context.Context, queryer sqlQueryer, groupUUID, expenseUUID
 	var splitConfig []byte
 	var voidedAt sql.NullTime
 	err := queryer.QueryRowContext(ctx, `
-		SELECT expense_uuid, group_uuid, created_by_actor_uuid, payer_actor_uuid,
-			name, description, currency_code, total_minor_units, split_method,
+		SELECT expense_uuid, group_uuid, created_by_actor_uuid, created_by_device_id,
+			payer_actor_uuid, name, description, currency_code,
+			total_minor_units, split_method,
 			split_config, occurred_at, created_at, updated_at,
 			latest_event_sequence, voided_at
 		FROM expenses
@@ -1188,6 +1222,7 @@ func loadExpense(ctx context.Context, queryer sqlQueryer, groupUUID, expenseUUID
 		&expense.UUID,
 		&expense.GroupUUID,
 		&expense.CreatedByActorUUID,
+		&expense.CreatedByDeviceID,
 		&expense.PayerActorUUID,
 		&expense.Name,
 		&expense.Description,
@@ -1211,7 +1246,7 @@ func loadExpense(ctx context.Context, queryer sqlQueryer, groupUUID, expenseUUID
 	expense.SplitConfig = append(json.RawMessage(nil), splitConfig...)
 	expense.Splits = make([]ExpenseSplit, 0)
 	rows, err := queryer.QueryContext(ctx, `
-		SELECT actor_uuid, amount_minor_units
+		SELECT actor_uuid, amount_minor_units, device_id
 		FROM expense_splits
 		WHERE group_uuid = $1 AND expense_uuid = $2
 		ORDER BY actor_uuid`, groupUUID, expenseUUID)
@@ -1221,7 +1256,7 @@ func loadExpense(ctx context.Context, queryer sqlQueryer, groupUUID, expenseUUID
 	defer rows.Close()
 	for rows.Next() {
 		var split ExpenseSplit
-		if err := rows.Scan(&split.ActorUUID, &split.AmountMinorUnits); err != nil {
+		if err := rows.Scan(&split.ActorUUID, &split.AmountMinorUnits, &split.DeviceID); err != nil {
 			return Expense{}, fmt.Errorf("scan expense split: %w", err)
 		}
 		expense.Splits = append(expense.Splits, split)

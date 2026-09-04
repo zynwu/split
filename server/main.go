@@ -63,6 +63,7 @@ func newHTTPServer(address string, db *database.Database) *http.Server {
 	mux.Handle("GET /api/groups/{group_uuid}/expenses", requireDeviceAuth(db, http.HandlerFunc(listExpensesHandler(db))))
 	mux.Handle("GET /api/groups/{group_uuid}/payments", requireDeviceAuth(db, http.HandlerFunc(listPaymentsHandler(db))))
 	mux.Handle("PUT /api/groups/{group_uuid}/expenses/{expense_uuid}", requireDeviceAuth(db, http.HandlerFunc(updateExpenseHandler(db))))
+	mux.Handle("POST /api/groups/{group_uuid}/actors/{actor_uuid}/commandeer", requireDeviceAuth(db, http.HandlerFunc(commandeerActorHandler(db))))
 	mux.Handle("PATCH /api/groups/{group_uuid}", requireDeviceAuth(db, http.HandlerFunc(updateGroupNameHandler(db))))
 	mux.Handle("PATCH /api/groups/{group_uuid}/actors/{actor_uuid}", requireDeviceAuth(db, http.HandlerFunc(updateActorDisplayNameHandler(db))))
 	mux.Handle("GET /api/groups/{group_uuid}/balances", requireDeviceAuth(db, http.HandlerFunc(listGroupBalancesHandler(db))))

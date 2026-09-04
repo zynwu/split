@@ -17,6 +17,7 @@ type Payment struct {
 	UUID                string     `json:"uuid"`
 	GroupUUID           string     `json:"group_uuid"`
 	CreatedByActorUUID  string     `json:"created_by_actor_uuid"`
+	CreatedByDeviceID   string     `json:"created_by_device_id"`
 	FromActorUUID       string     `json:"from_actor_uuid"`
 	ToActorUUID         string     `json:"to_actor_uuid"`
 	CurrencyCode        string     `json:"currency_code"`
@@ -69,14 +70,16 @@ func normalizePaymentPayload(payload *PaymentEventPayload) error {
 }
 
 func validatePaymentActorsTx(ctx context.Context, tx *sql.Tx, groupUUID string, payload *PaymentEventPayload) error {
-	for _, actorUUID := range []string{payload.FromActorUUID, payload.ToActorUUID} {
-		active, err := activeActorTx(ctx, tx, groupUUID, actorUUID)
+	resolvedActors := []*string{&payload.FromActorUUID, &payload.ToActorUUID}
+	for _, actorUUID := range resolvedActors {
+		resolvedActorUUID, err := resolveActorUUIDTx(ctx, tx, groupUUID, *actorUUID)
 		if err != nil {
 			return fmt.Errorf("check payment actor: %w", err)
 		}
-		if !active {
-			return fmt.Errorf("%w: %s", ErrActorNotFound, actorUUID)
-		}
+		*actorUUID = resolvedActorUUID
+	}
+	if payload.FromActorUUID == payload.ToActorUUID {
+		return fmt.Errorf("%w: from_actor_uuid and to_actor_uuid must be different after actor merges", ErrInvalidExpensePayload)
 	}
 	return nil
 }
@@ -90,14 +93,15 @@ func applyPaymentUpsertTx(ctx context.Context, tx *sql.Tx, event LedgerEvent, pa
 	if errors.Is(err, ErrPaymentNotFound) {
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO payments (
-				payment_uuid, group_uuid, created_by_actor_uuid,
+				payment_uuid, group_uuid, created_by_actor_uuid, created_by_device_id,
 				from_actor_uuid, to_actor_uuid, currency_code, amount_minor_units,
 				occurred_at, created_at, updated_at, latest_event_sequence, voided_at
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, NULL)`,
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, $11, NULL)`,
 			event.EntityUUID,
 			event.GroupUUID,
 			event.ActorUUID,
+			event.DeviceID,
 			payload.FromActorUUID,
 			payload.ToActorUUID,
 			payload.CurrencyCode,
@@ -168,7 +172,7 @@ func loadPaymentTx(ctx context.Context, tx *sql.Tx, groupUUID, paymentUUID strin
 	var payment Payment
 	var voidedAt sql.NullTime
 	err := tx.QueryRowContext(ctx, `
-		SELECT payment_uuid, group_uuid, created_by_actor_uuid,
+		SELECT payment_uuid, group_uuid, created_by_actor_uuid, created_by_device_id,
 			from_actor_uuid, to_actor_uuid, currency_code, amount_minor_units,
 			occurred_at, created_at, updated_at, latest_event_sequence, voided_at
 		FROM payments
@@ -176,6 +180,7 @@ func loadPaymentTx(ctx context.Context, tx *sql.Tx, groupUUID, paymentUUID strin
 		&payment.UUID,
 		&payment.GroupUUID,
 		&payment.CreatedByActorUUID,
+		&payment.CreatedByDeviceID,
 		&payment.FromActorUUID,
 		&payment.ToActorUUID,
 		&payment.CurrencyCode,
@@ -213,7 +218,7 @@ func (database *Database) ListPaymentsForDevice(ctx context.Context, groupUUID, 
 	}
 
 	rows, err := database.db.QueryContext(ctx, `
-		SELECT payment_uuid, group_uuid, created_by_actor_uuid,
+		SELECT payment_uuid, group_uuid, created_by_actor_uuid, created_by_device_id,
 			from_actor_uuid, to_actor_uuid, currency_code, amount_minor_units,
 			occurred_at, created_at, updated_at, latest_event_sequence, voided_at
 		FROM payments
@@ -232,6 +237,7 @@ func (database *Database) ListPaymentsForDevice(ctx context.Context, groupUUID, 
 			&payment.UUID,
 			&payment.GroupUUID,
 			&payment.CreatedByActorUUID,
+			&payment.CreatedByDeviceID,
 			&payment.FromActorUUID,
 			&payment.ToActorUUID,
 			&payment.CurrencyCode,

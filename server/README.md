@@ -91,6 +91,35 @@ returned by the groups and balances APIs. The change is recorded as an
 `actor.display_name_updated` ledger event. Reuse the same UUID in
 `Idempotency-Key` if a PATCH response is lost and the request must be retried.
 
+Reclaim/merge an existing actor from the device's current actor with:
+
+```sh
+curl -X POST "http://localhost:8080/api/groups/<group-uuid>/actors/<target-actor-uuid>/commandeer" \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <auth_token-from-register>' \
+  -d '{
+    "event_uuid":"<merge-event-uuid>",
+    "event_created_at":"2026-09-05T18:00:00Z",
+    "client_sequence":3
+  }'
+```
+
+The authenticated device's active actor is the merge source; the actor in the
+URL is the target. The source actor is archived and recorded as
+`merged_into_actor_uuid`, every active device binding for the source is
+recreated for the target, and all of those devices can subsequently act as the
+target actor. Expense creator/payer/split references and payment actor
+references are redirected in their current projections. A payment that would
+become a payment from an actor to itself is retained for audit but voided so it
+does not affect balances. The immutable ledger keeps the original event
+`actor_uuid`, `device_id`, and payload for future un-merge tooling.
+
+The response contains `source_actor_uuid`, `target_actor_uuid`, the target actor,
+and the `actor.commandeered` ledger event. Reuse the same `event_uuid`,
+`event_created_at`, and `client_sequence` after a lost response; the server
+returns `replayed:true` and does not apply the merge twice. Under the current
+trusted-group model, any active group member may perform this operation.
+
 Update a group's name with:
 
 ```sh
@@ -234,6 +263,14 @@ those net balances into direct payments. The current default is USD when a
 group has no expenses, while expenses in other currencies remain in separate
 native-currency buckets until exchange-rate conversion is introduced.
 
+Expense responses include `created_by_actor_uuid` with its
+`created_by_device_id`; each current split also includes the device that
+recorded that split snapshot. Payment responses include the analogous
+`created_by_actor_uuid`/`created_by_device_id` pair. The raw ledger event always
+contains the authenticated event `actor_uuid` and `device_id`, and its payload
+preserves the original payer, split, and payment actor IDs even after an actor
+merge redirects the materialized projections.
+
 For offline synchronization, keep the returned group event cursor locally and
 pull events after it:
 
@@ -251,8 +288,11 @@ current `version`, or if the event loses that timestamp comparison, the
 response has `"conflict":true`. A losing event remains in the ledger with
 `"applied":false` and does not overwrite the current projection.
 
-The top-level event `actor_uuid` must be the active actor currently bound to
-the authenticated device in that group. The payer and split actor UUIDs in the
+The top-level event `actor_uuid` normally must be the active actor currently
+bound to the authenticated device in that group. For offline transaction events
+created before an actor merge, the server also accepts that device's historical
+merged actor UUID and resolves it to the surviving actor for the projection.
+The original UUID remains in the ledger. The payer and split actor UUIDs in the
 expense payload may refer to any active group actors, since a member can record
 an expense paid by or shared with someone else.
 
@@ -328,11 +368,13 @@ creates the creator's durable actor identity and active device binding.
 `group_actors` stores the durable actor identity for each group member.
 Each actor can have a group-scoped `display_name`. `devices` stores normally stable device identifiers, and
 `actor_device_bindings` records the history of which device represented which
-actor when a device is replaced or an actor is reclaimed. Transactions should
-reference both `actor_uuid` and `device_id` so identity corrections do not
-erase device history. `payments` stores the current projection of one-to-one
-settlements; its immutable create, edit, and void history remains in
-`ledger_events`.
+actor when a device is replaced or an actor is reclaimed. A commandeered actor
+is archived with `merged_into_actor_uuid`; its historical bindings remain
+closed, and new active bindings point at the surviving actor. Transactions
+reference both actor and device provenance: expenses expose creator and split
+device IDs, while payments expose their creator device ID. The current
+`payments` projection stores one-to-one settlements; its immutable create, edit,
+void, and commandeering history remains in `ledger_events`.
 
 Stop the containers with:
 

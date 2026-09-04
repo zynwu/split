@@ -361,27 +361,33 @@ struct ExpenseSplit: Codable, Hashable, Identifiable {
     var id: ActorID { actorID }
     let actorID: ActorID
     let amountMinorUnits: Int64?
+    let usdAmountMinorUnits: Int64?
 
     private enum CodingKeys: String, CodingKey {
         case actor_uuid
         case amount_minor_units
+        case usd_amount_minor_units
     }
 
-    init(actorID: ActorID, amountMinorUnits: Int64? = nil) {
+    init(actorID: ActorID, amountMinorUnits: Int64? = nil, usdAmountMinorUnits: Int64? = nil) {
         self.actorID = actorID
         self.amountMinorUnits = amountMinorUnits
+        self.usdAmountMinorUnits = usdAmountMinorUnits
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.actorID = ActorID(rawValue: try container.decode(String.self, forKey: .actor_uuid))
         self.amountMinorUnits = try container.decodeIfPresent(Int64.self, forKey: .amount_minor_units)
+        self.usdAmountMinorUnits = try container.decodeIfPresent(Int64.self, forKey: .usd_amount_minor_units)
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(actorID.rawValue, forKey: .actor_uuid)
         try container.encodeIfPresent(amountMinorUnits, forKey: .amount_minor_units)
+        // usd_amount_minor_units is server-owned and must not be sent in a
+        // client-created or client-edited event payload.
     }
 }
 
@@ -462,6 +468,10 @@ struct ServerExpense: Decodable, Identifiable, Hashable {
     let groupID: GroupID
     let createdByActorID: ActorID
     let payload: ExpensePayload
+    let exchangeRateToUSD: String?
+    let usdTotalMinorUnits: Int64?
+    // The API returns this as a date-only string (YYYY-MM-DD), not an ISO-8601 timestamp.
+    let rateSnapshotDate: String?
     let createdAt: Date
     let updatedAt: Date
     let version: Int64
@@ -476,6 +486,9 @@ struct ServerExpense: Decodable, Identifiable, Hashable {
         case description
         case currency_code
         case total_minor_units
+        case exchange_rate_to_usd
+        case usd_total_minor_units
+        case rate_snapshot_date
         case split_method
         case split_config
         case occurred_at
@@ -491,6 +504,9 @@ struct ServerExpense: Decodable, Identifiable, Hashable {
         self.id = ExpenseID(rawValue: try container.decode(String.self, forKey: .uuid))
         self.groupID = GroupID(rawValue: try container.decode(String.self, forKey: .group_uuid))
         self.createdByActorID = ActorID(rawValue: try container.decode(String.self, forKey: .created_by_actor_uuid))
+        self.exchangeRateToUSD = try container.decodeIfPresent(String.self, forKey: .exchange_rate_to_usd)
+        self.usdTotalMinorUnits = try container.decodeIfPresent(Int64.self, forKey: .usd_total_minor_units)
+        self.rateSnapshotDate = try container.decodeIfPresent(String.self, forKey: .rate_snapshot_date)
         self.createdAt = try container.decode(Date.self, forKey: .created_at)
         self.updatedAt = try container.decode(Date.self, forKey: .updated_at)
         self.version = try container.decode(Int64.self, forKey: .version)
@@ -658,6 +674,10 @@ struct ServerPayment: Decodable, Identifiable, Hashable {
     let groupID: GroupID
     let createdByActorID: ActorID
     let payload: PaymentPayload
+    let exchangeRateToUSD: String?
+    let usdAmountMinorUnits: Int64?
+    // The API returns this as a date-only string (YYYY-MM-DD), not an ISO-8601 timestamp.
+    let rateSnapshotDate: String?
     let createdAt: Date
     let updatedAt: Date
     let version: Int64
@@ -671,6 +691,9 @@ struct ServerPayment: Decodable, Identifiable, Hashable {
         case to_actor_uuid
         case currency_code
         case amount_minor_units
+        case exchange_rate_to_usd
+        case usd_amount_minor_units
+        case rate_snapshot_date
         case occurred_at
         case created_at
         case updated_at
@@ -683,6 +706,9 @@ struct ServerPayment: Decodable, Identifiable, Hashable {
         self.id = PaymentID(rawValue: try container.decode(String.self, forKey: .uuid))
         self.groupID = GroupID(rawValue: try container.decode(String.self, forKey: .group_uuid))
         self.createdByActorID = ActorID(rawValue: try container.decode(String.self, forKey: .created_by_actor_uuid))
+        self.exchangeRateToUSD = try container.decodeIfPresent(String.self, forKey: .exchange_rate_to_usd)
+        self.usdAmountMinorUnits = try container.decodeIfPresent(Int64.self, forKey: .usd_amount_minor_units)
+        self.rateSnapshotDate = try container.decodeIfPresent(String.self, forKey: .rate_snapshot_date)
         self.createdAt = try container.decode(Date.self, forKey: .created_at)
         self.updatedAt = try container.decode(Date.self, forKey: .updated_at)
         self.version = try container.decode(Int64.self, forKey: .version)
@@ -874,6 +900,7 @@ struct CommandeerActorResponse: Decodable {
 
 struct PostEventResponse: Decodable {
     let sequence: Int64?
+    let event: PulledLedgerEvent?
     let applied: Bool?
     let replayed: Bool?
     let conflict: Bool?
@@ -903,9 +930,12 @@ struct PostEventResponse: Decodable {
         self.applied = try container.decodeIfPresent(Bool.self, forKey: .applied)
         self.replayed = try container.decodeIfPresent(Bool.self, forKey: .replayed)
         self.conflict = try container.decodeIfPresent(Bool.self, forKey: .conflict)
+        self.event = try? container.decodeIfPresent(PulledLedgerEvent.self, forKey: .event)
 
         if let sequence = try container.decodeIfPresent(Int64.self, forKey: .sequence) {
             self.sequence = sequence
+        } else if let event {
+            self.sequence = event.sequence
         } else if let eventContainer = try? container.nestedContainer(keyedBy: EventCodingKeys.self, forKey: .event) {
             self.sequence = try eventContainer.decodeIfPresent(Int64.self, forKey: .sequence)
         } else {
@@ -951,6 +981,10 @@ struct PulledLedgerEvent: Decodable, Identifiable, Hashable {
     let actorID: ActorID?
     let eventCreatedAt: Date?
     let payload: JSONValue?
+    let exchangeRateToUSD: String?
+    let usdAmountMinorUnits: Int64?
+    // The API returns this as a date-only string (YYYY-MM-DD), not an ISO-8601 timestamp.
+    let rateSnapshotDate: String?
 
     private enum CodingKeys: String, CodingKey {
         case event_uuid
@@ -961,6 +995,9 @@ struct PulledLedgerEvent: Decodable, Identifiable, Hashable {
         case actor_uuid
         case event_created_at
         case payload
+        case exchange_rate_to_usd
+        case usd_amount_minor_units
+        case rate_snapshot_date
     }
 
     init(from decoder: Decoder) throws {
@@ -973,6 +1010,9 @@ struct PulledLedgerEvent: Decodable, Identifiable, Hashable {
         self.actorID = try container.decodeIfPresent(String.self, forKey: .actor_uuid).map(ActorID.init(rawValue:))
         self.eventCreatedAt = try container.decodeIfPresent(Date.self, forKey: .event_created_at)
         self.payload = try container.decodeIfPresent(JSONValue.self, forKey: .payload)
+        self.exchangeRateToUSD = try container.decodeIfPresent(String.self, forKey: .exchange_rate_to_usd)
+        self.usdAmountMinorUnits = try container.decodeIfPresent(Int64.self, forKey: .usd_amount_minor_units)
+        self.rateSnapshotDate = try container.decodeIfPresent(String.self, forKey: .rate_snapshot_date)
     }
 }
 

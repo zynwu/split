@@ -170,6 +170,122 @@ struct DeviceActorLink: Codable, Hashable {
     let actorID: ActorID
 }
 
+private struct StoredExpenseSplit: Codable, Hashable {
+    let actorID: ActorID
+    let amountMinorUnits: Int64?
+    let usdAmountMinorUnits: Int64?
+
+    private enum CodingKeys: String, CodingKey {
+        case actor_uuid
+        case amount_minor_units
+        case usd_amount_minor_units
+    }
+
+    nonisolated init(_ split: ExpenseSplit) {
+        self.actorID = split.actorID
+        self.amountMinorUnits = split.amountMinorUnits
+        self.usdAmountMinorUnits = split.usdAmountMinorUnits
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.actorID = ActorID(rawValue: try container.decode(String.self, forKey: .actor_uuid))
+        self.amountMinorUnits = try container.decodeIfPresent(Int64.self, forKey: .amount_minor_units)
+        self.usdAmountMinorUnits = try container.decodeIfPresent(Int64.self, forKey: .usd_amount_minor_units)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(actorID.rawValue, forKey: .actor_uuid)
+        try container.encodeIfPresent(amountMinorUnits, forKey: .amount_minor_units)
+        try container.encodeIfPresent(usdAmountMinorUnits, forKey: .usd_amount_minor_units)
+    }
+
+    var expenseSplit: ExpenseSplit {
+        ExpenseSplit(
+            actorID: actorID,
+            amountMinorUnits: amountMinorUnits,
+            usdAmountMinorUnits: usdAmountMinorUnits
+        )
+    }
+}
+
+private struct StoredExpensePayload: Codable, Hashable {
+    let name: String
+    let description: String
+    let currencyCode: String
+    let totalMinorUnits: Int64
+    let payerActorID: ActorID
+    let splitMethod: SplitMethod
+    let splitConfig: [String: JSONValue]
+    let occurredAt: Date
+    let splits: [StoredExpenseSplit]
+
+    private enum CodingKeys: String, CodingKey {
+        case name
+        case description
+        case currency_code
+        case total_minor_units
+        case payer_actor_uuid
+        case split_method
+        case split_config
+        case occurred_at
+        case splits
+    }
+
+    init(_ payload: ExpensePayload) {
+        self.name = payload.name
+        self.description = payload.description
+        self.currencyCode = payload.currencyCode
+        self.totalMinorUnits = payload.totalMinorUnits
+        self.payerActorID = payload.payerActorID
+        self.splitMethod = payload.splitMethod
+        self.splitConfig = payload.splitConfig
+        self.occurredAt = payload.occurredAt
+        self.splits = payload.splits.map(StoredExpenseSplit.init)
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.name = try container.decode(String.self, forKey: .name)
+        self.description = try container.decodeIfPresent(String.self, forKey: .description) ?? ""
+        self.currencyCode = try container.decode(String.self, forKey: .currency_code)
+        self.totalMinorUnits = try container.decode(Int64.self, forKey: .total_minor_units)
+        self.payerActorID = ActorID(rawValue: try container.decode(String.self, forKey: .payer_actor_uuid))
+        self.splitMethod = try container.decode(SplitMethod.self, forKey: .split_method)
+        self.splitConfig = try container.decodeIfPresent([String: JSONValue].self, forKey: .split_config) ?? [:]
+        self.occurredAt = try container.decode(Date.self, forKey: .occurred_at)
+        self.splits = try container.decode([StoredExpenseSplit].self, forKey: .splits)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(name, forKey: .name)
+        try container.encode(description, forKey: .description)
+        try container.encode(currencyCode, forKey: .currency_code)
+        try container.encode(totalMinorUnits, forKey: .total_minor_units)
+        try container.encode(payerActorID.rawValue, forKey: .payer_actor_uuid)
+        try container.encode(splitMethod, forKey: .split_method)
+        try container.encode(splitConfig, forKey: .split_config)
+        try container.encode(occurredAt, forKey: .occurred_at)
+        try container.encode(splits, forKey: .splits)
+    }
+
+    var expensePayload: ExpensePayload {
+        ExpensePayload(
+            name: name,
+            description: description,
+            currencyCode: currencyCode,
+            totalMinorUnits: totalMinorUnits,
+            payerActorID: payerActorID,
+            splitMethod: splitMethod,
+            splitConfig: splitConfig,
+            occurredAt: occurredAt,
+            splits: splits.map(\.expenseSplit)
+        )
+    }
+}
+
 struct ExpenseRecord: Codable, Hashable, Identifiable {
     let id: ExpenseID
     let groupID: GroupID
@@ -179,6 +295,25 @@ struct ExpenseRecord: Codable, Hashable, Identifiable {
     var updatedAt: Date
     var version: Int64
     var voidedAt: Date?
+    // These values are locked by the server when the event is accepted. They
+    // remain optional for pending local events and older snapshots.
+    var exchangeRateToUSD: String?
+    var usdTotalMinorUnits: Int64?
+    var rateSnapshotDate: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case groupID
+        case createdByActorID
+        case payload
+        case createdAt
+        case updatedAt
+        case version
+        case voidedAt
+        case exchangeRateToUSD
+        case usdTotalMinorUnits
+        case rateSnapshotDate
+    }
 
     init(
         id: ExpenseID,
@@ -188,7 +323,10 @@ struct ExpenseRecord: Codable, Hashable, Identifiable {
         createdAt: Date,
         updatedAt: Date,
         version: Int64,
-        voidedAt: Date? = nil
+        voidedAt: Date? = nil,
+        exchangeRateToUSD: String? = nil,
+        usdTotalMinorUnits: Int64? = nil,
+        rateSnapshotDate: String? = nil
     ) {
         self.id = id
         self.groupID = groupID
@@ -198,6 +336,9 @@ struct ExpenseRecord: Codable, Hashable, Identifiable {
         self.updatedAt = updatedAt
         self.version = version
         self.voidedAt = voidedAt
+        self.exchangeRateToUSD = exchangeRateToUSD
+        self.usdTotalMinorUnits = usdTotalMinorUnits
+        self.rateSnapshotDate = rateSnapshotDate
     }
 
     init(serverExpense: ServerExpense) {
@@ -209,6 +350,39 @@ struct ExpenseRecord: Codable, Hashable, Identifiable {
         self.updatedAt = serverExpense.updatedAt
         self.version = serverExpense.version
         self.voidedAt = serverExpense.voidedAt
+        self.exchangeRateToUSD = serverExpense.exchangeRateToUSD
+        self.usdTotalMinorUnits = serverExpense.usdTotalMinorUnits
+        self.rateSnapshotDate = serverExpense.rateSnapshotDate
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(ExpenseID.self, forKey: .id)
+        self.groupID = try container.decode(GroupID.self, forKey: .groupID)
+        self.createdByActorID = try container.decode(ActorID.self, forKey: .createdByActorID)
+        self.payload = try container.decode(StoredExpensePayload.self, forKey: .payload).expensePayload
+        self.createdAt = try container.decode(Date.self, forKey: .createdAt)
+        self.updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        self.version = try container.decode(Int64.self, forKey: .version)
+        self.voidedAt = try container.decodeIfPresent(Date.self, forKey: .voidedAt)
+        self.exchangeRateToUSD = try container.decodeIfPresent(String.self, forKey: .exchangeRateToUSD)
+        self.usdTotalMinorUnits = try container.decodeIfPresent(Int64.self, forKey: .usdTotalMinorUnits)
+        self.rateSnapshotDate = try container.decodeIfPresent(String.self, forKey: .rateSnapshotDate)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(groupID, forKey: .groupID)
+        try container.encode(createdByActorID, forKey: .createdByActorID)
+        try container.encode(StoredExpensePayload(payload), forKey: .payload)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
+        try container.encode(version, forKey: .version)
+        try container.encodeIfPresent(voidedAt, forKey: .voidedAt)
+        try container.encodeIfPresent(exchangeRateToUSD, forKey: .exchangeRateToUSD)
+        try container.encodeIfPresent(usdTotalMinorUnits, forKey: .usdTotalMinorUnits)
+        try container.encodeIfPresent(rateSnapshotDate, forKey: .rateSnapshotDate)
     }
 }
 
@@ -221,6 +395,11 @@ struct PaymentRecord: Codable, Hashable, Identifiable {
     var updatedAt: Date
     var version: Int64
     var voidedAt: Date?
+    // These values are locked by the server when the event is accepted. They
+    // remain optional for pending local events and older snapshots.
+    var exchangeRateToUSD: String?
+    var usdAmountMinorUnits: Int64?
+    var rateSnapshotDate: String?
 
     init(
         id: PaymentID,
@@ -230,7 +409,10 @@ struct PaymentRecord: Codable, Hashable, Identifiable {
         createdAt: Date,
         updatedAt: Date,
         version: Int64,
-        voidedAt: Date? = nil
+        voidedAt: Date? = nil,
+        exchangeRateToUSD: String? = nil,
+        usdAmountMinorUnits: Int64? = nil,
+        rateSnapshotDate: String? = nil
     ) {
         self.id = id
         self.groupID = groupID
@@ -240,6 +422,9 @@ struct PaymentRecord: Codable, Hashable, Identifiable {
         self.updatedAt = updatedAt
         self.version = version
         self.voidedAt = voidedAt
+        self.exchangeRateToUSD = exchangeRateToUSD
+        self.usdAmountMinorUnits = usdAmountMinorUnits
+        self.rateSnapshotDate = rateSnapshotDate
     }
 
     init(serverPayment: ServerPayment) {
@@ -251,6 +436,9 @@ struct PaymentRecord: Codable, Hashable, Identifiable {
         self.updatedAt = serverPayment.updatedAt
         self.version = serverPayment.version
         self.voidedAt = serverPayment.voidedAt
+        self.exchangeRateToUSD = serverPayment.exchangeRateToUSD
+        self.usdAmountMinorUnits = serverPayment.usdAmountMinorUnits
+        self.rateSnapshotDate = serverPayment.rateSnapshotDate
     }
 }
 
@@ -277,6 +465,9 @@ struct ExpenseAuditEntry: Codable, Hashable, Identifiable {
     let expenseName: String
     let totalMinorUnits: Int64
     let currencyCode: String
+    let exchangeRateToUSD: String?
+    let usdTotalMinorUnits: Int64?
+    let rateSnapshotDate: String?
     let eventCreatedAt: Date
     var isPending: Bool
 
@@ -295,6 +486,9 @@ struct ExpenseAuditEntry: Codable, Hashable, Identifiable {
         self.expenseName = payload.name
         self.totalMinorUnits = payload.totalMinorUnits
         self.currencyCode = payload.currencyCode
+        self.exchangeRateToUSD = nil
+        self.usdTotalMinorUnits = nil
+        self.rateSnapshotDate = nil
         self.eventCreatedAt = event.eventCreatedAt
         self.isPending = isPending
     }
@@ -317,6 +511,9 @@ struct ExpenseAuditEntry: Codable, Hashable, Identifiable {
         self.expenseName = payload.name
         self.totalMinorUnits = payload.totalMinorUnits
         self.currencyCode = payload.currencyCode
+        self.exchangeRateToUSD = pulledEvent.exchangeRateToUSD
+        self.usdTotalMinorUnits = pulledEvent.usdAmountMinorUnits
+        self.rateSnapshotDate = pulledEvent.rateSnapshotDate
         self.eventCreatedAt = eventCreatedAt
         self.isPending = false
     }
@@ -331,6 +528,9 @@ struct ExpenseAuditEntry: Codable, Hashable, Identifiable {
         self.expenseName = expense.payload.name
         self.totalMinorUnits = expense.payload.totalMinorUnits
         self.currencyCode = expense.payload.currencyCode
+        self.exchangeRateToUSD = expense.exchangeRateToUSD
+        self.usdTotalMinorUnits = expense.usdTotalMinorUnits
+        self.rateSnapshotDate = expense.rateSnapshotDate
         self.eventCreatedAt = expense.createdAt
         self.isPending = false
     }
@@ -347,6 +547,9 @@ struct PaymentAuditEntry: Codable, Hashable, Identifiable {
     let toActorID: ActorID
     let amountMinorUnits: Int64
     let currencyCode: String
+    let exchangeRateToUSD: String?
+    let usdAmountMinorUnits: Int64?
+    let rateSnapshotDate: String?
     let eventCreatedAt: Date
     var isPending: Bool
 
@@ -364,6 +567,9 @@ struct PaymentAuditEntry: Codable, Hashable, Identifiable {
         self.toActorID = payload.toActorID
         self.amountMinorUnits = payload.amountMinorUnits
         self.currencyCode = payload.currencyCode
+        self.exchangeRateToUSD = nil
+        self.usdAmountMinorUnits = nil
+        self.rateSnapshotDate = nil
         self.eventCreatedAt = event.eventCreatedAt
         self.isPending = isPending
     }
@@ -387,6 +593,9 @@ struct PaymentAuditEntry: Codable, Hashable, Identifiable {
         self.toActorID = payload.toActorID
         self.amountMinorUnits = payload.amountMinorUnits
         self.currencyCode = payload.currencyCode
+        self.exchangeRateToUSD = pulledEvent.exchangeRateToUSD
+        self.usdAmountMinorUnits = pulledEvent.usdAmountMinorUnits
+        self.rateSnapshotDate = pulledEvent.rateSnapshotDate
         self.eventCreatedAt = eventCreatedAt
         self.isPending = false
     }
@@ -402,6 +611,9 @@ struct PaymentAuditEntry: Codable, Hashable, Identifiable {
         self.toActorID = payment.payload.toActorID
         self.amountMinorUnits = payment.payload.amountMinorUnits
         self.currencyCode = payment.payload.currencyCode
+        self.exchangeRateToUSD = payment.exchangeRateToUSD
+        self.usdAmountMinorUnits = payment.usdAmountMinorUnits
+        self.rateSnapshotDate = payment.rateSnapshotDate
         self.eventCreatedAt = payment.createdAt
         self.isPending = false
     }
@@ -1415,6 +1627,15 @@ final class SplitStore {
     }
 
     private func applyCanonicalState(_ response: PostEventResponse, for event: LedgerEventRequest, groupID: GroupID) {
+        if let pulledEvent = response.event {
+            if let auditEntry = ExpenseAuditEntry(groupID: groupID, pulledEvent: pulledEvent) {
+                upsertAuditEntry(auditEntry)
+            }
+            if let paymentAuditEntry = PaymentAuditEntry(groupID: groupID, pulledEvent: pulledEvent) {
+                upsertPaymentAuditEntry(paymentAuditEntry)
+            }
+        }
+
         if let serverExpense = response.expense {
             upsertExpense(ExpenseRecord(serverExpense: serverExpense))
         }

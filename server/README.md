@@ -120,13 +120,54 @@ a second event. The server returns `replayed:true` for a duplicate of the same
 event and returns the canonical current projection with the response.
 
 The generic events endpoint accepts `expense.created`, `expense.updated`,
-`expense.voided`, `group.name_updated`, and `actor.display_name_updated` events.
+`expense.voided`, `payment.created`, `payment.updated`, `payment.voided`,
+`group.name_updated`, and `actor.display_name_updated` events.
 Group-name events return a `group` projection and actor-name events return an
 `actor` projection. Metadata projections use their own
 `latest_metadata_event_sequence` version, so an expense edit cannot overwrite
 a name change. If two offline edits target the same projection, the event with
 the later client `event_created_at` wins; the other event is retained with
 `applied:false` and `conflict:true`.
+
+Record a one-to-one payment with the same ledger endpoint:
+
+```sh
+curl -X POST "http://localhost:8080/api/groups/<group-uuid>/events" \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <auth_token-from-register>' \
+  -d '{
+    "event_uuid":"<new-event-uuid>",
+    "entity_type":"payment",
+    "entity_uuid":"<new-payment-uuid>",
+    "event_type":"payment.created",
+    "actor_uuid":"<authenticated-member-actor-uuid>",
+    "event_created_at":"2026-09-05T18:00:00Z",
+    "client_sequence":2,
+    "base_sequence":0,
+    "payload_version":1,
+    "payload":{
+      "from_actor_uuid":"<payer-actor-uuid>",
+      "to_actor_uuid":"<recipient-actor-uuid>",
+      "currency_code":"USD",
+      "amount_minor_units":1250,
+      "occurred_at":"2026-09-05T17:55:00Z"
+    }
+  }'
+```
+
+The event response includes the current `payment` projection. `from_actor_uuid`
+is debited and `to_actor_uuid` is credited by the payment amount. Payments are
+kept in their native currency. Read all payment records, including voided
+history, with:
+
+```sh
+curl "http://localhost:8080/api/groups/<group-uuid>/payments" \
+  -H 'Authorization: Bearer <auth_token-from-register>'
+```
+
+Use `payment.updated` with the same `entity_uuid` and a new event UUID to edit
+a payment, or `payment.voided` to reverse it without deleting its ledger
+history. Reuse the same event UUID and client sequence for retries.
 
 Create an expense with `POST /api/groups/<group-uuid>/events`:
 
@@ -289,7 +330,9 @@ Each actor can have a group-scoped `display_name`. `devices` stores normally sta
 `actor_device_bindings` records the history of which device represented which
 actor when a device is replaced or an actor is reclaimed. Transactions should
 reference both `actor_uuid` and `device_id` so identity corrections do not
-erase device history.
+erase device history. `payments` stores the current projection of one-to-one
+settlements; its immutable create, edit, and void history remains in
+`ledger_events`.
 
 Stop the containers with:
 

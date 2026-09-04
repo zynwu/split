@@ -50,11 +50,11 @@ type balanceSide struct {
 	Amount    int64
 }
 
-// GetGroupBalancesForDevice calculates current balances from the expense
-// projection. It intentionally does not persist balances: they are derived
-// data and the ledger sequence makes the result reproducible for the client.
-// Balances are kept in native currencies so a future exchange-rate provider
-// can add conversion without changing the expense representation.
+// GetGroupBalancesForDevice calculates current balances from the expense and
+// payment projections. It intentionally does not persist balances: they are
+// derived data and the ledger sequence makes the result reproducible for the
+// client. Balances are kept in native currencies so a future exchange-rate
+// provider can add conversion without changing the expense representation.
 func (database *Database) GetGroupBalancesForDevice(ctx context.Context, groupUUID, deviceID string) (GroupBalances, error) {
 	groupUUID, err := normalizeUUID(groupUUID, "group_uuid")
 	if err != nil {
@@ -108,6 +108,15 @@ func (database *Database) GetGroupBalancesForDevice(ctx context.Context, groupUU
 	}
 
 	amountsByCurrency := make(map[string]map[string]int64)
+	ensureCurrency := func(currencyCode string) map[string]int64 {
+		if _, ok := amountsByCurrency[currencyCode]; !ok {
+			amountsByCurrency[currencyCode] = make(map[string]int64, len(actors))
+			for actorUUID := range actors {
+				amountsByCurrency[currencyCode][actorUUID] = 0
+			}
+		}
+		return amountsByCurrency[currencyCode]
+	}
 
 	rows, err := tx.QueryContext(ctx, `
 		SELECT e.expense_uuid, e.currency_code, e.total_minor_units,
@@ -122,8 +131,6 @@ func (database *Database) GetGroupBalancesForDevice(ctx context.Context, groupUU
 	if err != nil {
 		return GroupBalances{}, fmt.Errorf("query expenses for balances: %w", err)
 	}
-	defer rows.Close()
-
 	seenExpenses := make(map[string]struct{})
 	for rows.Next() {
 		var expenseUUID, currencyCode, payerActorUUID string
@@ -142,15 +149,10 @@ func (database *Database) GetGroupBalancesForDevice(ctx context.Context, groupUU
 			return GroupBalances{}, fmt.Errorf("scan expense balance row: %w", err)
 		}
 
-		if _, ok := amountsByCurrency[currencyCode]; !ok {
-			amountsByCurrency[currencyCode] = make(map[string]int64)
-			for actorUUID := range actors {
-				amountsByCurrency[currencyCode][actorUUID] = 0
-			}
-		}
+		amounts := ensureCurrency(currencyCode)
 
 		if _, seen := seenExpenses[expenseUUID]; !seen {
-			if err := addBalance(amountsByCurrency[currencyCode], payerActorUUID, totalMinorUnits); err != nil {
+			if err := addBalance(amounts, payerActorUUID, totalMinorUnits); err != nil {
 				return GroupBalances{}, fmt.Errorf("credit expense payer: %w", err)
 			}
 			seenExpenses[expenseUUID] = struct{}{}
@@ -160,7 +162,7 @@ func (database *Database) GetGroupBalancesForDevice(ctx context.Context, groupUU
 			if !splitAmountMinorUnits.Valid {
 				return GroupBalances{}, fmt.Errorf("expense %s has an invalid split amount", expenseUUID)
 			}
-			if err := addBalance(amountsByCurrency[currencyCode], splitActorUUID.String, -splitAmountMinorUnits.Int64); err != nil {
+			if err := addBalance(amounts, splitActorUUID.String, -splitAmountMinorUnits.Int64); err != nil {
 				return GroupBalances{}, fmt.Errorf("debit expense split: %w", err)
 			}
 		}
@@ -168,7 +170,46 @@ func (database *Database) GetGroupBalancesForDevice(ctx context.Context, groupUU
 	if err := rows.Err(); err != nil {
 		return GroupBalances{}, fmt.Errorf("iterate expense balance rows: %w", err)
 	}
-	if len(seenExpenses) == 0 {
+	if err := rows.Close(); err != nil {
+		return GroupBalances{}, fmt.Errorf("close expense balance rows: %w", err)
+	}
+
+	paymentRows, err := tx.QueryContext(ctx, `
+		SELECT currency_code, amount_minor_units, from_actor_uuid, to_actor_uuid
+		FROM payments
+		WHERE group_uuid = $1
+			AND voided_at IS NULL
+		ORDER BY payment_uuid`, groupUUID)
+	if err != nil {
+		return GroupBalances{}, fmt.Errorf("query payments for balances: %w", err)
+	}
+	for paymentRows.Next() {
+		var currencyCode, fromActorUUID, toActorUUID string
+		var amountMinorUnits int64
+		if err := paymentRows.Scan(&currencyCode, &amountMinorUnits, &fromActorUUID, &toActorUUID); err != nil {
+			paymentRows.Close()
+			return GroupBalances{}, fmt.Errorf("scan payment balance row: %w", err)
+		}
+
+		amounts := ensureCurrency(currencyCode)
+		if err := addBalance(amounts, fromActorUUID, -amountMinorUnits); err != nil {
+			paymentRows.Close()
+			return GroupBalances{}, fmt.Errorf("debit payment sender: %w", err)
+		}
+		if err := addBalance(amounts, toActorUUID, amountMinorUnits); err != nil {
+			paymentRows.Close()
+			return GroupBalances{}, fmt.Errorf("credit payment recipient: %w", err)
+		}
+	}
+	if err := paymentRows.Err(); err != nil {
+		paymentRows.Close()
+		return GroupBalances{}, fmt.Errorf("iterate payment balance rows: %w", err)
+	}
+	if err := paymentRows.Close(); err != nil {
+		return GroupBalances{}, fmt.Errorf("close payment balance rows: %w", err)
+	}
+
+	if len(amountsByCurrency) == 0 {
 		amountsByCurrency[defaultBalanceCurrencyCode] = make(map[string]int64, len(actors))
 		for actorUUID := range actors {
 			amountsByCurrency[defaultBalanceCurrencyCode][actorUUID] = 0

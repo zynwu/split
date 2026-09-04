@@ -201,7 +201,7 @@ func queryInt64(request *http.Request, key string, fallback int64) (int64, error
 
 func writeLedgerEventError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, database.ErrGroupNotFound), errors.Is(err, database.ErrGroupMembershipDenied), errors.Is(err, database.ErrActorNotFound), errors.Is(err, database.ErrExpenseNotFound):
+	case errors.Is(err, database.ErrGroupNotFound), errors.Is(err, database.ErrGroupMembershipDenied), errors.Is(err, database.ErrActorNotFound), errors.Is(err, database.ErrExpenseNotFound), errors.Is(err, database.ErrPaymentNotFound):
 		writeJSON(w, http.StatusNotFound, map[string]string{
 			"error": "group or actor not found",
 		})

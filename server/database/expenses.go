@@ -110,6 +110,7 @@ type LedgerEvent struct {
 type AppendLedgerEventResult struct {
 	Event    LedgerEvent `json:"event"`
 	Expense  *Expense    `json:"expense,omitempty"`
+	Payment  *Payment    `json:"payment,omitempty"`
 	Group    *Group      `json:"group,omitempty"`
 	Actor    *GroupActor `json:"actor,omitempty"`
 	Applied  bool        `json:"applied"`
@@ -131,6 +132,7 @@ type sqlQueryer interface {
 type normalizedLedgerEvent struct {
 	input                   LedgerEventInput
 	expensePayload          *ExpenseEventPayload
+	paymentPayload          *PaymentEventPayload
 	groupNamePayload        *GroupNameEventPayload
 	actorDisplayNamePayload *ActorDisplayNameEventPayload
 }
@@ -268,6 +270,26 @@ func (database *Database) AppendLedgerEvent(ctx context.Context, deviceID string
 		if (normalized.input.EventType == "expense.voided" || normalized.input.EventType == "expense.deleted") && !currentExpenseExists {
 			return AppendLedgerEventResult{}, ErrExpenseNotFound
 		}
+	case "payment":
+		currentPayment, paymentErr := loadPaymentTx(ctx, tx, normalized.input.GroupUUID, normalized.input.EntityUUID)
+		currentPaymentExists := paymentErr == nil
+		if paymentErr != nil && !errors.Is(paymentErr, ErrPaymentNotFound) {
+			return AppendLedgerEventResult{}, paymentErr
+		}
+		if currentPaymentExists {
+			currentSequence = currentPayment.LatestEventSequence
+		}
+		if normalized.paymentPayload != nil {
+			if err := validatePaymentActorsTx(ctx, tx, normalized.input.GroupUUID, normalized.paymentPayload); err != nil {
+				return AppendLedgerEventResult{}, err
+			}
+		}
+		if normalized.input.EventType == "payment.updated" && !currentPaymentExists {
+			return AppendLedgerEventResult{}, ErrPaymentNotFound
+		}
+		if (normalized.input.EventType == "payment.voided" || normalized.input.EventType == "payment.deleted") && !currentPaymentExists {
+			return AppendLedgerEventResult{}, ErrPaymentNotFound
+		}
 	case "group":
 		currentSequence = group.LatestMetadataEventSequence
 	case "actor":
@@ -373,6 +395,26 @@ func (database *Database) AppendLedgerEvent(ctx context.Context, deviceID string
 			return AppendLedgerEventResult{}, err
 		}
 		result.Expense = &current
+	case "payment":
+		switch normalized.input.EventType {
+		case "payment.upsert", "payment.created", "payment.updated":
+			if winningEvent {
+				if err := applyPaymentUpsertTx(ctx, tx, event, *normalized.paymentPayload); err != nil {
+					return AppendLedgerEventResult{}, err
+				}
+			}
+		case "payment.voided", "payment.deleted":
+			if winningEvent {
+				if err := applyPaymentVoidedTx(ctx, tx, event); err != nil {
+					return AppendLedgerEventResult{}, err
+				}
+			}
+		}
+		current, err := loadPaymentTx(ctx, tx, normalized.input.GroupUUID, normalized.input.EntityUUID)
+		if err != nil {
+			return AppendLedgerEventResult{}, err
+		}
+		result.Payment = &current
 	case "group":
 		if winningEvent {
 			if err := applyGroupNameTx(ctx, tx, event, *normalized.groupNamePayload); err != nil {
@@ -468,6 +510,13 @@ func replayLedgerEventTx(ctx context.Context, tx *sql.Tx, event LedgerEvent) (Ap
 		}
 		result.Expense = &expense
 		result.Applied = expense.LatestEventSequence == event.Sequence
+	case "payment":
+		payment, err := loadPaymentTx(ctx, tx, event.GroupUUID, event.EntityUUID)
+		if err != nil {
+			return AppendLedgerEventResult{}, err
+		}
+		result.Payment = &payment
+		result.Applied = payment.LatestEventSequence == event.Sequence
 	case "group":
 		group, err := loadGroupTx(ctx, tx, event.GroupUUID)
 		if err != nil {
@@ -690,7 +739,7 @@ func normalizeLedgerEvent(input LedgerEventInput) (normalizedLedgerEvent, error)
 		input.EventCreatedAt = input.EventCreatedAt.UTC().Truncate(time.Microsecond)
 	}
 	input.EntityType = strings.ToLower(strings.TrimSpace(input.EntityType))
-	if input.EntityType != "expense" && input.EntityType != "group" && input.EntityType != "actor" {
+	if input.EntityType != "expense" && input.EntityType != "payment" && input.EntityType != "group" && input.EntityType != "actor" {
 		return normalizedLedgerEvent{}, fmt.Errorf("%w: entity_type %q", ErrUnsupportedEvent, input.EntityType)
 	}
 	input.EventType = strings.ToLower(strings.TrimSpace(input.EventType))
@@ -732,6 +781,36 @@ func normalizeLedgerEvent(input LedgerEventInput) (normalizedLedgerEvent, error)
 			normalized.input.Payload = canonicalPayload
 			normalized.expensePayload = &payload
 		case "expense.voided", "expense.deleted":
+			if len(input.Payload) > 0 {
+				var object map[string]json.RawMessage
+				if err := json.Unmarshal(input.Payload, &object); err != nil || object == nil {
+					return normalizedLedgerEvent{}, fmt.Errorf("%w: void event payload must be a JSON object", ErrInvalidExpensePayload)
+				}
+			}
+			normalized.input.Payload = json.RawMessage(`{}`)
+		default:
+			return normalizedLedgerEvent{}, fmt.Errorf("%w: event_type %q", ErrUnsupportedEvent, input.EventType)
+		}
+	case "payment":
+		switch input.EventType {
+		case "payment.upsert", "payment.created", "payment.updated":
+			if len(input.Payload) == 0 {
+				return normalizedLedgerEvent{}, fmt.Errorf("%w: payload is required", ErrInvalidExpensePayload)
+			}
+			var payload PaymentEventPayload
+			if err := json.Unmarshal(input.Payload, &payload); err != nil {
+				return normalizedLedgerEvent{}, fmt.Errorf("%w: decode payment payload: %v", ErrInvalidExpensePayload, err)
+			}
+			if err := normalizePaymentPayload(&payload); err != nil {
+				return normalizedLedgerEvent{}, err
+			}
+			canonicalPayload, err := json.Marshal(payload)
+			if err != nil {
+				return normalizedLedgerEvent{}, fmt.Errorf("%w: encode payment payload: %v", ErrInvalidExpensePayload, err)
+			}
+			normalized.input.Payload = canonicalPayload
+			normalized.paymentPayload = &payload
+		case "payment.voided", "payment.deleted":
 			if len(input.Payload) > 0 {
 				var object map[string]json.RawMessage
 				if err := json.Unmarshal(input.Payload, &object); err != nil || object == nil {

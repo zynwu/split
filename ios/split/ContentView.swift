@@ -253,7 +253,8 @@ private struct JoinGroupSheet: View {
 private struct GroupDetailView: View {
     @Bindable var store: SplitStore
     let groupID: GroupID
-    @State private var isShowingAddExpense = false
+    @State private var isGroupActionMenuExpanded = false
+    @State private var activeGroupDetailSheet: GroupDetailSheet?
     @State private var isShowingEditGroupName = false
     @State private var activeActorNameEdit: ActorNameEdit?
     @State private var selectedTab: GroupDetailTab = .balances
@@ -271,8 +272,23 @@ private struct GroupDetailView: View {
         store.expenses(for: groupID)
     }
 
+    private var groupPaymentAuditEvents: [PaymentAuditEntry] {
+        store.paymentAuditEvents(for: groupID)
+    }
+
     private var groupAuditEvents: [ExpenseAuditEntry] {
         store.auditEvents(for: groupID)
+    }
+
+    private var activityRows: [GroupActivityRow] {
+        let expenseRows = groupAuditEvents.map(GroupActivityRow.expense)
+        let paymentRows = groupPaymentAuditEvents.map(GroupActivityRow.payment)
+        return (expenseRows + paymentRows).sorted { lhs, rhs in
+            if lhs.occurredAt == rhs.occurredAt {
+                return lhs.id > rhs.id
+            }
+            return lhs.occurredAt > rhs.occurredAt
+        }
     }
 
     var body: some View {
@@ -291,16 +307,11 @@ private struct GroupDetailView: View {
                 VStack(spacing: 14) {
                     HStack {
                         Spacer()
-                        Button {
-                            isShowingAddExpense = true
-                        } label: {
-                            Image(systemName: "plus")
-                                .font(.title2.weight(.semibold))
-                                .frame(width: 56, height: 56)
-                        }
-                        .buttonStyle(.glass)
-                        .buttonBorderShape(.circle)
-                        .accessibilityLabel("Add expense")
+                        GroupDetailActionButton(
+                            isExpanded: $isGroupActionMenuExpanded,
+                            recordPayment: showRecordPaymentSheet,
+                            addExpense: showAddExpenseSheet
+                        )
                     }
 
                     GroupDetailTabSlider(selectedTab: $selectedTab)
@@ -325,22 +336,37 @@ private struct GroupDetailView: View {
         .task(id: groupID) {
             await store.syncGroup(id: groupID)
         }
-        .sheet(isPresented: $isShowingAddExpense) {
+        .sheet(item: $activeGroupDetailSheet) { sheet in
             if let group {
-                AddExpenseSheet(group: group, actors: groupActors) { input in
-                    await store.createExpense(
-                        in: group.id,
-                        name: input.name,
-                        description: "",
-                        currencyCode: input.currencyCode,
-                        totalMinorUnits: input.totalMinorUnits,
-                        payerActorID: input.payerActorID,
-                        splitMethod: input.splitMethod,
-                        manualSplits: input.manualSplits,
-                        occurredAt: Date()
-                    )
+                switch sheet {
+                case .recordPayment:
+                    RecordPaymentSheet(group: group, actors: groupActors) { input in
+                        await store.createPayment(
+                            in: group.id,
+                            fromActorID: input.fromActorID,
+                            toActorID: input.toActorID,
+                            currencyCode: input.currencyCode,
+                            amountMinorUnits: input.amountMinorUnits,
+                            occurredAt: Date()
+                        )
+                    }
+                    .presentationDetents([.medium])
+                case .addExpense:
+                    AddExpenseSheet(group: group, actors: groupActors) { input in
+                        await store.createExpense(
+                            in: group.id,
+                            name: input.name,
+                            description: "",
+                            currencyCode: input.currencyCode,
+                            totalMinorUnits: input.totalMinorUnits,
+                            payerActorID: input.payerActorID,
+                            splitMethod: input.splitMethod,
+                            manualSplits: input.manualSplits,
+                            occurredAt: Date()
+                        )
+                    }
+                    .presentationDetents([.large])
                 }
-                .presentationDetents([.large])
             }
         }
         .sheet(isPresented: $isShowingEditGroupName) {
@@ -409,22 +435,45 @@ private struct GroupDetailView: View {
         }
     }
 
+    private func showRecordPaymentSheet() {
+        isGroupActionMenuExpanded = false
+        activeGroupDetailSheet = .recordPayment
+    }
+
+    private func showAddExpenseSheet() {
+        isGroupActionMenuExpanded = false
+        activeGroupDetailSheet = .addExpense
+    }
+
     private var activityList: some View {
         List {
             Section("Activity") {
-                if groupAuditEvents.isEmpty {
+                if activityRows.isEmpty {
                     Text("No activity yet")
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(groupAuditEvents) { auditEvent in
-                        if store.expense(id: auditEvent.expenseID) != nil {
-                            NavigationLink {
-                                ExpenseDetailView(store: store, expenseID: auditEvent.expenseID)
-                            } label: {
+                    ForEach(activityRows) { row in
+                        switch row {
+                        case .expense(let auditEvent):
+                            if store.expense(id: auditEvent.expenseID) != nil {
+                                NavigationLink {
+                                    ExpenseDetailView(store: store, expenseID: auditEvent.expenseID)
+                                } label: {
+                                    AuditEventRow(auditEvent: auditEvent, actor: store.actor(for: auditEvent.actorID))
+                                }
+                            } else {
                                 AuditEventRow(auditEvent: auditEvent, actor: store.actor(for: auditEvent.actorID))
                             }
-                        } else {
-                            AuditEventRow(auditEvent: auditEvent, actor: store.actor(for: auditEvent.actorID))
+                        case .payment(let paymentAuditEvent):
+                            NavigationLink {
+                                PaymentDetailView(store: store, paymentID: paymentAuditEvent.paymentID)
+                            } label: {
+                                PaymentRow(
+                                    auditEvent: paymentAuditEvent,
+                                    fromActor: store.actor(for: paymentAuditEvent.fromActorID),
+                                    toActor: store.actor(for: paymentAuditEvent.toActorID)
+                                )
+                            }
                         }
                     }
                 }
@@ -433,6 +482,82 @@ private struct GroupDetailView: View {
         }
         .refreshable {
             await store.syncGroup(id: groupID)
+        }
+    }
+}
+
+private enum GroupActivityRow: Identifiable {
+    case expense(ExpenseAuditEntry)
+    case payment(PaymentAuditEntry)
+
+    var id: String {
+        switch self {
+        case .expense(let auditEvent):
+            "expense-\(auditEvent.id.rawValue)"
+        case .payment(let paymentAuditEvent):
+            "payment-\(paymentAuditEvent.id.rawValue)"
+        }
+    }
+
+    var occurredAt: Date {
+        switch self {
+        case .expense(let auditEvent):
+            auditEvent.eventCreatedAt
+        case .payment(let paymentAuditEvent):
+            paymentAuditEvent.eventCreatedAt
+        }
+    }
+}
+
+private enum GroupDetailSheet: String, Identifiable {
+    case recordPayment
+    case addExpense
+
+    var id: String { rawValue }
+}
+
+private struct GroupDetailActionButton: View {
+    @Binding var isExpanded: Bool
+    let recordPayment: () -> Void
+    let addExpense: () -> Void
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 12) {
+            if isExpanded {
+                VStack(alignment: .trailing, spacing: 10) {
+                    Button(action: recordPayment) {
+                        Label("Record Payment", systemImage: "arrow.left.arrow.right")
+                            .font(.subheadline.weight(.medium))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.plain)
+                    .glassEffect()
+
+                    Button(action: addExpense) {
+                        Label("Add Expense", systemImage: "receipt")
+                            .font(.subheadline.weight(.medium))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.plain)
+                    .glassEffect()
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
+            Button {
+                withAnimation(.snappy) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                Image(systemName: isExpanded ? "xmark" : "plus")
+                    .font(.title2.weight(.semibold))
+                    .frame(width: 56, height: 56)
+            }
+            .buttonStyle(.glass)
+            .buttonBorderShape(.circle)
+            .accessibilityLabel(isExpanded ? "Close group actions" : "Open group actions")
         }
     }
 }
@@ -563,6 +688,53 @@ private struct MemberRow: View {
                 }
                 .buttonStyle(.borderless)
                 .accessibilityLabel("Edit display name")
+            }
+        }
+    }
+}
+
+private struct PaymentRow: View {
+    let auditEvent: PaymentAuditEntry
+    let fromActor: Actor?
+    let toActor: Actor?
+
+    private var title: String {
+        switch auditEvent.eventType {
+        case "payment.created":
+            "Created payment"
+        case "payment.updated":
+            "Updated payment"
+        case "payment.voided":
+            "Voided payment"
+        default:
+            "Payment event"
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                Text("\(fromActor?.displayName ?? "Unknown") paid \(toActor?.displayName ?? "Unknown")")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            VStack(alignment: .trailing, spacing: 4) {
+                Text(MoneyText.display(auditEvent.amountMinorUnits, currencyCode: auditEvent.currencyCode))
+                    .font(.body.monospacedDigit())
+
+                if auditEvent.isPending {
+                    Text("Pending")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if let sequence = auditEvent.sequence {
+                    Text("#\(sequence)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }
@@ -723,6 +895,138 @@ private struct EditActorDisplayNameSheet: View {
         Task {
             await saveDisplayName(cleanName)
             isSaving = false
+            dismiss()
+        }
+    }
+}
+
+private struct RecordPaymentInput {
+    let fromActorID: ActorID
+    let toActorID: ActorID
+    let currencyCode: String
+    let amountMinorUnits: Int64
+}
+
+private struct RecordPaymentSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var amount = ""
+    @State private var currencyCode = "USD"
+    @State private var fromActorRawValue: String
+    @State private var toActorRawValue: String
+    @State private var isSubmitting = false
+
+    let group: ExpenseGroup
+    let actors: [Actor]
+    let title: String
+    let recordPayment: (RecordPaymentInput) async -> Void
+
+    private var selectedFromActorID: ActorID? {
+        ActorID(rawValue: fromActorRawValue)
+    }
+
+    private var selectedToActorID: ActorID? {
+        ActorID(rawValue: toActorRawValue)
+    }
+
+    private var amountMinorUnits: Int64? {
+        MoneyText.minorUnits(from: amount)
+    }
+
+    private var canSubmit: Bool {
+        !isSubmitting
+            && amountMinorUnits != nil
+            && amountMinorUnits != 0
+            && selectedFromActorID != nil
+            && selectedToActorID != nil
+            && selectedFromActorID != selectedToActorID
+    }
+
+    init(
+        group: ExpenseGroup,
+        actors: [Actor],
+        payment: PaymentRecord? = nil,
+        title: String = "Record Payment",
+        recordPayment: @escaping (RecordPaymentInput) async -> Void
+    ) {
+        self.group = group
+        self.actors = actors
+        self.title = title
+        self.recordPayment = recordPayment
+
+        let fromActorID = payment?.payload.fromActorID ?? group.localActorID
+        let toActorID = payment?.payload.toActorID ?? actors.first { $0.id != fromActorID }?.id ?? fromActorID
+        self._amount = State(initialValue: payment.map { MoneyText.inputText($0.payload.amountMinorUnits) } ?? "")
+        self._currencyCode = State(initialValue: payment?.payload.currencyCode ?? "USD")
+        self._fromActorRawValue = State(initialValue: fromActorID.rawValue)
+        self._toActorRawValue = State(initialValue: toActorID.rawValue)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Payment") {
+                    TextField("Amount", text: $amount)
+                        .keyboardType(.decimalPad)
+
+                    TextField("Currency", text: $currencyCode)
+                        .textInputAutocapitalization(.characters)
+                        .autocorrectionDisabled()
+                }
+
+                Section("Members") {
+                    Picker("From", selection: $fromActorRawValue) {
+                        ForEach(actors) { actor in
+                            Text(actor.displayName).tag(actor.id.rawValue)
+                        }
+                    }
+
+                    Picker("To", selection: $toActorRawValue) {
+                        ForEach(actors) { actor in
+                            Text(actor.displayName).tag(actor.id.rawValue)
+                        }
+                    }
+
+                    if selectedFromActorID == selectedToActorID {
+                        Text("Choose two different members.")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+            .navigationTitle(title)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                    .disabled(isSubmitting)
+                }
+
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(isSubmitting ? "Saving" : "Save", action: submit)
+                        .disabled(!canSubmit)
+                }
+            }
+        }
+    }
+
+    private func submit() {
+        guard canSubmit,
+              let selectedFromActorID,
+              let selectedToActorID,
+              let amountMinorUnits else { return }
+        isSubmitting = true
+
+        let input = RecordPaymentInput(
+            fromActorID: selectedFromActorID,
+            toActorID: selectedToActorID,
+            currencyCode: currencyCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased(),
+            amountMinorUnits: amountMinorUnits
+        )
+
+        Task {
+            await recordPayment(input)
+            isSubmitting = false
             dismiss()
         }
     }
@@ -949,6 +1253,71 @@ private struct ManualSplitRow: View {
                     .multilineTextAlignment(.trailing)
                     .frame(width: 96)
                     .font(.body.monospacedDigit())
+            }
+        }
+    }
+}
+
+private struct PaymentDetailView: View {
+    @Bindable var store: SplitStore
+    let paymentID: PaymentID
+    @State private var isShowingEditPayment = false
+
+    private var payment: PaymentRecord? {
+        store.payment(id: paymentID)
+    }
+
+    private var group: ExpenseGroup? {
+        guard let payment else { return nil }
+        return store.groups.first { $0.id == payment.groupID }
+    }
+
+    private var groupActors: [Actor] {
+        guard let group else { return [] }
+        return group.actorIDs.compactMap { store.actor(for: $0) }
+    }
+
+    var body: some View {
+        List {
+            if let payment {
+                Section("Payment") {
+                    LabeledContent("Amount", value: MoneyText.display(payment.payload.amountMinorUnits, currencyCode: payment.payload.currencyCode))
+                    LabeledContent("From", value: store.actor(for: payment.payload.fromActorID)?.displayName ?? payment.payload.fromActorID.rawValue)
+                    LabeledContent("To", value: store.actor(for: payment.payload.toActorID)?.displayName ?? payment.payload.toActorID.rawValue)
+
+                    if store.isPaymentPending(id: payment.id) {
+                        LabeledContent("Ledger", value: "Pending")
+                    } else if payment.version > 0 {
+                        LabeledContent("Ledger", value: "#\(payment.version)")
+                    }
+                }
+            } else {
+                Text("Payment not found")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle("Payment")
+        .toolbar {
+            if payment != nil && group != nil {
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Edit") {
+                        isShowingEditPayment = true
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $isShowingEditPayment) {
+            if let payment, let group {
+                RecordPaymentSheet(group: group, actors: groupActors, payment: payment, title: "Edit Payment") { input in
+                    await store.updatePayment(
+                        id: payment.id,
+                        fromActorID: input.fromActorID,
+                        toActorID: input.toActorID,
+                        currencyCode: input.currencyCode,
+                        amountMinorUnits: input.amountMinorUnits
+                    )
+                }
+                .presentationDetents([.medium])
             }
         }
     }

@@ -605,6 +605,102 @@ struct ExpenseEventRequest: Codable, Hashable, Identifiable {
     }
 }
 
+struct PaymentPayload: Codable, Hashable {
+    var fromActorID: ActorID
+    var toActorID: ActorID
+    var currencyCode: String
+    var amountMinorUnits: Int64
+    var occurredAt: Date
+
+    private enum CodingKeys: String, CodingKey {
+        case from_actor_uuid
+        case to_actor_uuid
+        case currency_code
+        case amount_minor_units
+        case occurred_at
+    }
+
+    init(
+        fromActorID: ActorID,
+        toActorID: ActorID,
+        currencyCode: String,
+        amountMinorUnits: Int64,
+        occurredAt: Date
+    ) {
+        self.fromActorID = fromActorID
+        self.toActorID = toActorID
+        self.currencyCode = currencyCode
+        self.amountMinorUnits = amountMinorUnits
+        self.occurredAt = occurredAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.fromActorID = ActorID(rawValue: try container.decode(String.self, forKey: .from_actor_uuid))
+        self.toActorID = ActorID(rawValue: try container.decode(String.self, forKey: .to_actor_uuid))
+        self.currencyCode = try container.decode(String.self, forKey: .currency_code)
+        self.amountMinorUnits = try container.decode(Int64.self, forKey: .amount_minor_units)
+        self.occurredAt = try container.decode(Date.self, forKey: .occurred_at)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(fromActorID.rawValue, forKey: .from_actor_uuid)
+        try container.encode(toActorID.rawValue, forKey: .to_actor_uuid)
+        try container.encode(currencyCode, forKey: .currency_code)
+        try container.encode(amountMinorUnits, forKey: .amount_minor_units)
+        try container.encode(occurredAt, forKey: .occurred_at)
+    }
+}
+
+struct ServerPayment: Decodable, Identifiable, Hashable {
+    let id: PaymentID
+    let groupID: GroupID
+    let createdByActorID: ActorID
+    let payload: PaymentPayload
+    let createdAt: Date
+    let updatedAt: Date
+    let version: Int64
+    let voidedAt: Date?
+
+    private enum CodingKeys: String, CodingKey {
+        case uuid
+        case group_uuid
+        case created_by_actor_uuid
+        case from_actor_uuid
+        case to_actor_uuid
+        case currency_code
+        case amount_minor_units
+        case occurred_at
+        case created_at
+        case updated_at
+        case version
+        case voided_at
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = PaymentID(rawValue: try container.decode(String.self, forKey: .uuid))
+        self.groupID = GroupID(rawValue: try container.decode(String.self, forKey: .group_uuid))
+        self.createdByActorID = ActorID(rawValue: try container.decode(String.self, forKey: .created_by_actor_uuid))
+        self.createdAt = try container.decode(Date.self, forKey: .created_at)
+        self.updatedAt = try container.decode(Date.self, forKey: .updated_at)
+        self.version = try container.decode(Int64.self, forKey: .version)
+        self.voidedAt = try container.decodeIfPresent(Date.self, forKey: .voided_at)
+        self.payload = PaymentPayload(
+            fromActorID: ActorID(rawValue: try container.decode(String.self, forKey: .from_actor_uuid)),
+            toActorID: ActorID(rawValue: try container.decode(String.self, forKey: .to_actor_uuid)),
+            currencyCode: try container.decode(String.self, forKey: .currency_code),
+            amountMinorUnits: try container.decode(Int64.self, forKey: .amount_minor_units),
+            occurredAt: try container.decode(Date.self, forKey: .occurred_at)
+        )
+    }
+}
+
+struct PaymentsResponse: Decodable {
+    let payments: [ServerPayment]
+}
+
 struct LedgerEventRequest: Codable, Hashable, Identifiable {
     var id: EventID { eventID }
     let eventID: EventID
@@ -675,6 +771,11 @@ struct LedgerEventRequest: Codable, Hashable, Identifiable {
         return try? payload.decode(ExpensePayload.self)
     }
 
+    func paymentPayload() -> PaymentPayload? {
+        guard entityType == "payment" else { return nil }
+        return try? payload.decode(PaymentPayload.self)
+    }
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.eventID = EventID(rawValue: try container.decode(String.self, forKey: .event_uuid))
@@ -742,6 +843,7 @@ struct PostEventResponse: Decodable {
     let replayed: Bool?
     let conflict: Bool?
     let expense: ServerExpense?
+    let payment: ServerPayment?
     let group: ServerGroupMetadata?
     let actor: ServerActor?
 
@@ -752,6 +854,7 @@ struct PostEventResponse: Decodable {
         case replayed
         case conflict
         case expense
+        case payment
         case group
         case actor
     }
@@ -775,6 +878,7 @@ struct PostEventResponse: Decodable {
         }
 
         self.expense = try? container.decodeIfPresent(ServerExpense.self, forKey: .expense)
+        self.payment = try? container.decodeIfPresent(ServerPayment.self, forKey: .payment)
         self.group = try? container.decodeIfPresent(ServerGroupMetadata.self, forKey: .group)
         self.actor = try? container.decodeIfPresent(ServerActor.self, forKey: .actor)
     }
@@ -932,6 +1036,12 @@ struct SplitAPIClient {
     func fetchBalances(groupID: GroupID) async throws -> GroupBalancesResponse {
         let request = try authorizedRequest(path: "/groups/\(groupID.rawValue)/balances")
         return try await send(request)
+    }
+
+    func fetchPayments(groupID: GroupID) async throws -> [ServerPayment] {
+        let request = try authorizedRequest(path: "/groups/\(groupID.rawValue)/payments")
+        let response: PaymentsResponse = try await send(request)
+        return response.payments
     }
 
     func postExpenseEvent(groupID: GroupID, event: ExpenseEventRequest) async throws -> PostEventResponse {

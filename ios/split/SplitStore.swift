@@ -37,6 +37,16 @@ struct ExpenseID: RawRepresentable, Codable, Hashable, Identifiable {
     }
 }
 
+struct PaymentID: RawRepresentable, Codable, Hashable, Identifiable {
+    let rawValue: String
+
+    var id: String { rawValue }
+
+    static func generate() -> PaymentID {
+        PaymentID(rawValue: UUID().uuidString)
+    }
+}
+
 struct EventID: RawRepresentable, Codable, Hashable, Identifiable {
     let rawValue: String
 
@@ -202,6 +212,48 @@ struct ExpenseRecord: Codable, Hashable, Identifiable {
     }
 }
 
+struct PaymentRecord: Codable, Hashable, Identifiable {
+    let id: PaymentID
+    let groupID: GroupID
+    var createdByActorID: ActorID
+    var payload: PaymentPayload
+    var createdAt: Date
+    var updatedAt: Date
+    var version: Int64
+    var voidedAt: Date?
+
+    init(
+        id: PaymentID,
+        groupID: GroupID,
+        createdByActorID: ActorID,
+        payload: PaymentPayload,
+        createdAt: Date,
+        updatedAt: Date,
+        version: Int64,
+        voidedAt: Date? = nil
+    ) {
+        self.id = id
+        self.groupID = groupID
+        self.createdByActorID = createdByActorID
+        self.payload = payload
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.version = version
+        self.voidedAt = voidedAt
+    }
+
+    init(serverPayment: ServerPayment) {
+        self.id = serverPayment.id
+        self.groupID = serverPayment.groupID
+        self.createdByActorID = serverPayment.createdByActorID
+        self.payload = serverPayment.payload
+        self.createdAt = serverPayment.createdAt
+        self.updatedAt = serverPayment.updatedAt
+        self.version = serverPayment.version
+        self.voidedAt = serverPayment.voidedAt
+    }
+}
+
 struct PendingSyncOperation: Codable, Hashable, Identifiable {
     var id: EventID { event.eventID }
     let groupID: GroupID
@@ -284,14 +336,87 @@ struct ExpenseAuditEntry: Codable, Hashable, Identifiable {
     }
 }
 
+struct PaymentAuditEntry: Codable, Hashable, Identifiable {
+    let id: EventID
+    let groupID: GroupID
+    var sequence: Int64?
+    let eventType: String
+    let actorID: ActorID
+    let paymentID: PaymentID
+    let fromActorID: ActorID
+    let toActorID: ActorID
+    let amountMinorUnits: Int64
+    let currencyCode: String
+    let eventCreatedAt: Date
+    var isPending: Bool
+
+    init?(groupID: GroupID, event: LedgerEventRequest, sequence: Int64? = nil, isPending: Bool) {
+        guard event.entityType == "payment",
+              let payload = event.paymentPayload() else { return nil }
+
+        self.id = event.eventID
+        self.groupID = groupID
+        self.sequence = sequence
+        self.eventType = event.eventType
+        self.actorID = event.actorID
+        self.paymentID = PaymentID(rawValue: event.entityID)
+        self.fromActorID = payload.fromActorID
+        self.toActorID = payload.toActorID
+        self.amountMinorUnits = payload.amountMinorUnits
+        self.currencyCode = payload.currencyCode
+        self.eventCreatedAt = event.eventCreatedAt
+        self.isPending = isPending
+    }
+
+    init?(groupID: GroupID, pulledEvent: PulledLedgerEvent) {
+        guard pulledEvent.entityType == "payment",
+              let eventType = pulledEvent.eventType,
+              let actorID = pulledEvent.actorID,
+              let paymentID = pulledEvent.entityID.map(PaymentID.init(rawValue:)),
+              let eventCreatedAt = pulledEvent.eventCreatedAt,
+              let payloadValue = pulledEvent.payload,
+              let payload = try? payloadValue.decode(PaymentPayload.self) else { return nil }
+
+        self.id = pulledEvent.eventID
+        self.groupID = groupID
+        self.sequence = pulledEvent.sequence
+        self.eventType = eventType
+        self.actorID = actorID
+        self.paymentID = paymentID
+        self.fromActorID = payload.fromActorID
+        self.toActorID = payload.toActorID
+        self.amountMinorUnits = payload.amountMinorUnits
+        self.currencyCode = payload.currencyCode
+        self.eventCreatedAt = eventCreatedAt
+        self.isPending = false
+    }
+
+    init(groupID: GroupID, payment: PaymentRecord) {
+        self.id = EventID(rawValue: "payment-\(payment.id.rawValue)-created")
+        self.groupID = groupID
+        self.sequence = payment.version > 0 ? payment.version : nil
+        self.eventType = "payment.created"
+        self.actorID = payment.createdByActorID
+        self.paymentID = payment.id
+        self.fromActorID = payment.payload.fromActorID
+        self.toActorID = payment.payload.toActorID
+        self.amountMinorUnits = payment.payload.amountMinorUnits
+        self.currencyCode = payment.payload.currencyCode
+        self.eventCreatedAt = payment.createdAt
+        self.isPending = false
+    }
+}
+
 struct SplitSnapshot: Codable {
     var migratedDeviceID: DeviceID?
     var displayName: String
     var actors: [Actor]
     var groups: [ExpenseGroup]
     var expenses: [ExpenseRecord]
+    var payments: [PaymentRecord]
     var pendingOperations: [PendingSyncOperation]
     var auditEvents: [ExpenseAuditEntry]
+    var paymentAuditEvents: [PaymentAuditEntry]
     var groupBalances: [GroupID: GroupBalancesResponse]
     var nextClientSequence: Int64
 
@@ -301,9 +426,11 @@ struct SplitSnapshot: Codable {
         case actors
         case groups
         case expenses
+        case payments
         case pendingOperations
         case pendingEvents
         case auditEvents
+        case paymentAuditEvents
         case groupBalances
         case nextClientSequence
     }
@@ -313,8 +440,10 @@ struct SplitSnapshot: Codable {
         actors: [Actor],
         groups: [ExpenseGroup],
         expenses: [ExpenseRecord],
+        payments: [PaymentRecord],
         pendingOperations: [PendingSyncOperation],
         auditEvents: [ExpenseAuditEntry],
+        paymentAuditEvents: [PaymentAuditEntry],
         groupBalances: [GroupID: GroupBalancesResponse],
         nextClientSequence: Int64
     ) {
@@ -323,8 +452,10 @@ struct SplitSnapshot: Codable {
         self.actors = actors
         self.groups = groups
         self.expenses = expenses
+        self.payments = payments
         self.pendingOperations = pendingOperations
         self.auditEvents = auditEvents
+        self.paymentAuditEvents = paymentAuditEvents
         self.groupBalances = groupBalances
         self.nextClientSequence = nextClientSequence
     }
@@ -335,6 +466,7 @@ struct SplitSnapshot: Codable {
         self.actors = try container.decode([Actor].self, forKey: .actors)
         self.groups = try container.decode([ExpenseGroup].self, forKey: .groups)
         self.expenses = try container.decodeIfPresent([ExpenseRecord].self, forKey: .expenses) ?? []
+        self.payments = try container.decodeIfPresent([PaymentRecord].self, forKey: .payments) ?? []
         if let pendingOperations = try container.decodeIfPresent([PendingSyncOperation].self, forKey: .pendingOperations) {
             self.pendingOperations = pendingOperations
         } else {
@@ -348,6 +480,8 @@ struct SplitSnapshot: Codable {
         }
         self.auditEvents = try container.decodeIfPresent([ExpenseAuditEntry].self, forKey: .auditEvents)
             ?? self.pendingOperations.compactMap { ExpenseAuditEntry(groupID: $0.groupID, event: $0.event, isPending: true) }
+        self.paymentAuditEvents = try container.decodeIfPresent([PaymentAuditEntry].self, forKey: .paymentAuditEvents)
+            ?? self.pendingOperations.compactMap { PaymentAuditEntry(groupID: $0.groupID, event: $0.event, isPending: true) }
         self.groupBalances = try container.decodeIfPresent([GroupID: GroupBalancesResponse].self, forKey: .groupBalances) ?? [:]
         self.nextClientSequence = try container.decodeIfPresent(Int64.self, forKey: .nextClientSequence) ?? 0
 
@@ -366,8 +500,10 @@ struct SplitSnapshot: Codable {
         try container.encode(actors, forKey: .actors)
         try container.encode(groups, forKey: .groups)
         try container.encode(expenses, forKey: .expenses)
+        try container.encode(payments, forKey: .payments)
         try container.encode(pendingOperations, forKey: .pendingOperations)
         try container.encode(auditEvents, forKey: .auditEvents)
+        try container.encode(paymentAuditEvents, forKey: .paymentAuditEvents)
         try container.encode(groupBalances, forKey: .groupBalances)
         try container.encode(nextClientSequence, forKey: .nextClientSequence)
     }
@@ -418,8 +554,10 @@ final class SplitStore {
     private(set) var actors: [Actor]
     private(set) var groups: [ExpenseGroup]
     private(set) var expenses: [ExpenseRecord]
+    private(set) var payments: [PaymentRecord]
     private(set) var pendingOperations: [PendingSyncOperation]
     private(set) var auditEvents: [ExpenseAuditEntry]
+    private(set) var paymentAuditEvents: [PaymentAuditEntry]
     private(set) var groupBalances: [GroupID: GroupBalancesResponse]
     private(set) var registrationStatus: RegistrationStatus = .notStarted
 
@@ -462,8 +600,10 @@ final class SplitStore {
             self.actors = snapshot.actors
             self.groups = snapshot.groups
             self.expenses = snapshot.expenses
+            self.payments = snapshot.payments
             self.pendingOperations = snapshot.pendingOperations
             self.auditEvents = snapshot.auditEvents
+            self.paymentAuditEvents = snapshot.paymentAuditEvents
             self.groupBalances = snapshot.groupBalances
             self.nextClientSequence = snapshot.nextClientSequence
             self.auditEvents = deduplicatedAuditEvents(auditEvents)
@@ -474,8 +614,10 @@ final class SplitStore {
             self.actors = []
             self.groups = []
             self.expenses = []
+            self.payments = []
             self.pendingOperations = []
             self.auditEvents = []
+            self.paymentAuditEvents = []
             self.groupBalances = [:]
             self.nextClientSequence = 0
             persist()
@@ -586,8 +728,10 @@ final class SplitStore {
     func removeGroup(id: GroupID) {
         groups.removeAll { $0.id == id }
         expenses.removeAll { $0.groupID == id }
+        payments.removeAll { $0.groupID == id }
         pendingOperations.removeAll { $0.groupID == id }
         auditEvents.removeAll { $0.groupID == id }
+        paymentAuditEvents.removeAll { $0.groupID == id }
         groupBalances[id] = nil
         pruneUnusedActors()
         persist()
@@ -607,8 +751,40 @@ final class SplitStore {
         expenses.first { $0.id == expenseID && $0.voidedAt == nil }
     }
 
+    func payments(for groupID: GroupID) -> [PaymentRecord] {
+        payments
+            .filter { $0.groupID == groupID && $0.voidedAt == nil }
+            .sorted { $0.payload.occurredAt > $1.payload.occurredAt }
+    }
+
+    func payment(id paymentID: PaymentID) -> PaymentRecord? {
+        payments.first { $0.id == paymentID && $0.voidedAt == nil }
+    }
+
+    func isPaymentPending(id paymentID: PaymentID) -> Bool {
+        pendingOperations.contains { operation in
+            operation.event.entityType == "payment" && operation.event.entityID == paymentID.rawValue
+        }
+    }
+
     func balances(for groupID: GroupID) -> GroupBalancesResponse? {
         groupBalances[groupID]
+    }
+
+    func paymentAuditEvents(for groupID: GroupID) -> [PaymentAuditEntry] {
+        let storedEntries = deduplicatedPaymentAuditEvents(paymentAuditEvents.filter { $0.groupID == groupID })
+        let paymentIDsWithCreatedEvents = Set(storedEntries.filter { $0.eventType == "payment.created" }.map(\.paymentID))
+        let fallbackEntries = payments
+            .filter { $0.groupID == groupID && !paymentIDsWithCreatedEvents.contains($0.id) }
+            .map { PaymentAuditEntry(groupID: groupID, payment: $0) }
+
+        return deduplicatedPaymentAuditEvents(storedEntries + fallbackEntries)
+            .sorted { lhs, rhs in
+                if lhs.eventCreatedAt == rhs.eventCreatedAt {
+                    return lhs.id.rawValue > rhs.id.rawValue
+                }
+                return lhs.eventCreatedAt > rhs.eventCreatedAt
+            }
     }
 
     func auditEvents(for groupID: GroupID) -> [ExpenseAuditEntry] {
@@ -701,6 +877,62 @@ final class SplitStore {
         }
     }
 
+    func createPayment(
+        in groupID: GroupID,
+        fromActorID: ActorID,
+        toActorID: ActorID,
+        currencyCode: String = "USD",
+        amountMinorUnits: Int64,
+        occurredAt: Date = Date()
+    ) async {
+        do {
+            let event = try makePaymentEvent(
+                groupID: groupID,
+                paymentID: .generate(),
+                eventType: "payment.created",
+                baseSequence: 0,
+                fromActorID: fromActorID,
+                toActorID: toActorID,
+                currencyCode: currencyCode,
+                amountMinorUnits: amountMinorUnits,
+                occurredAt: occurredAt
+            )
+            enqueue(event, groupID: groupID)
+            applyLocalPayment(event: event, groupID: groupID)
+            await syncGroup(id: groupID)
+        } catch {
+            registrationStatus = .failed(error.localizedDescription)
+        }
+    }
+
+    func updatePayment(
+        id paymentID: PaymentID,
+        fromActorID: ActorID,
+        toActorID: ActorID,
+        currencyCode: String = "USD",
+        amountMinorUnits: Int64
+    ) async {
+        do {
+            guard let payment = payment(id: paymentID) else { throw SplitStoreError.groupNotFound }
+            let event = try makePaymentEvent(
+                groupID: payment.groupID,
+                paymentID: payment.id,
+                eventType: "payment.updated",
+                baseSequence: payment.version,
+                fromActorID: fromActorID,
+                toActorID: toActorID,
+                currencyCode: currencyCode,
+                amountMinorUnits: amountMinorUnits,
+                occurredAt: payment.payload.occurredAt
+            )
+            enqueue(event, groupID: payment.groupID)
+            applyLocalPayment(event: event, groupID: payment.groupID)
+            await syncGroup(id: payment.groupID)
+        } catch {
+            registrationStatus = .failed(error.localizedDescription)
+        }
+    }
+
     func syncGroup(id groupID: GroupID) async {
         guard !syncingGroupIDs.contains(groupID) else { return }
         syncingGroupIDs.insert(groupID)
@@ -712,6 +944,7 @@ final class SplitStore {
             try await pullRemoteEvents(for: groupID)
             try await refreshAuditEvents(for: groupID)
             try await refreshExpenses(for: groupID)
+            try await refreshPayments(for: groupID)
             try await refreshBalances(for: groupID)
             persist()
         } catch {
@@ -793,6 +1026,9 @@ final class SplitStore {
                 if let auditEntry = ExpenseAuditEntry(groupID: groupID, pulledEvent: event) {
                     upsertAuditEntry(auditEntry)
                 }
+                if let paymentAuditEntry = PaymentAuditEntry(groupID: groupID, pulledEvent: event) {
+                    upsertPaymentAuditEntry(paymentAuditEntry)
+                }
             }
 
             let eventIDs = Set(response.events.map(\.eventID))
@@ -811,11 +1047,14 @@ final class SplitStore {
     private func refreshAuditEvents(for groupID: GroupID) async throws {
         var cursor = Int64(0)
         var refreshedEntries: [ExpenseAuditEntry] = []
+        var refreshedPaymentEntries: [PaymentAuditEntry] = []
 
         while true {
             let response = try await apiClient.fetchGroupEvents(groupID: groupID, after: cursor)
             let entries = response.events.compactMap { ExpenseAuditEntry(groupID: groupID, pulledEvent: $0) }
+            let paymentEntries = response.events.compactMap { PaymentAuditEntry(groupID: groupID, pulledEvent: $0) }
             refreshedEntries.append(contentsOf: entries)
+            refreshedPaymentEntries.append(contentsOf: paymentEntries)
 
             guard let maxSequence = response.events.map(\.sequence).max() else { break }
             cursor = maxSequence
@@ -825,10 +1064,19 @@ final class SplitStore {
             }
         }
 
-        guard !refreshedEntries.isEmpty else { return }
         let pendingEntries = auditEvents.filter { $0.groupID == groupID && $0.isPending }
-        auditEvents.removeAll { $0.groupID == groupID }
-        auditEvents.append(contentsOf: deduplicatedAuditEvents(refreshedEntries + pendingEntries))
+        let pendingPaymentEntries = paymentAuditEvents.filter { $0.groupID == groupID && $0.isPending }
+
+        if !refreshedEntries.isEmpty {
+            auditEvents.removeAll { $0.groupID == groupID }
+            auditEvents.append(contentsOf: deduplicatedAuditEvents(refreshedEntries + pendingEntries))
+        }
+
+        if !refreshedPaymentEntries.isEmpty {
+            paymentAuditEvents.removeAll { $0.groupID == groupID }
+            paymentAuditEvents.append(contentsOf: deduplicatedPaymentAuditEvents(refreshedPaymentEntries + pendingPaymentEntries))
+        }
+
         persist()
     }
 
@@ -836,6 +1084,12 @@ final class SplitStore {
         let serverExpenses = try await apiClient.fetchExpenses(groupID: groupID)
         expenses.removeAll { $0.groupID == groupID }
         expenses.append(contentsOf: serverExpenses.map(ExpenseRecord.init(serverExpense:)))
+    }
+
+    private func refreshPayments(for groupID: GroupID) async throws {
+        let serverPayments = try await apiClient.fetchPayments(groupID: groupID)
+        payments.removeAll { $0.groupID == groupID }
+        payments.append(contentsOf: serverPayments.map(PaymentRecord.init(serverPayment:)))
     }
 
     private func refreshBalances(for groupID: GroupID) async throws {
@@ -900,6 +1154,45 @@ final class SplitStore {
         )
     }
 
+    private func makePaymentEvent(
+        groupID: GroupID,
+        paymentID: PaymentID,
+        eventType: String,
+        baseSequence: Int64,
+        fromActorID: ActorID,
+        toActorID: ActorID,
+        currencyCode: String,
+        amountMinorUnits: Int64,
+        occurredAt: Date
+    ) throws -> LedgerEventRequest {
+        guard let group = groups.first(where: { $0.id == groupID }),
+              group.actorIDs.contains(fromActorID),
+              group.actorIDs.contains(toActorID),
+              fromActorID != toActorID else {
+            throw SplitStoreError.groupNotFound
+        }
+
+        let payload = PaymentPayload(
+            fromActorID: fromActorID,
+            toActorID: toActorID,
+            currencyCode: currencyCode,
+            amountMinorUnits: amountMinorUnits,
+            occurredAt: occurredAt
+        )
+
+        return LedgerEventRequest(
+            eventID: .generate(),
+            entityType: "payment",
+            entityID: paymentID.rawValue,
+            eventType: eventType,
+            actorID: group.localActorID,
+            eventCreatedAt: Date(),
+            clientSequence: allocateClientSequence(),
+            baseSequence: baseSequence,
+            payload: try JSONValue.fromEncodable(payload)
+        )
+    }
+
     private func makeGroupNameEvent(groupID: GroupID, name: String, baseSequence: Int64) throws -> LedgerEventRequest {
         guard let group = groups.first(where: { $0.id == groupID }) else {
             throw SplitStoreError.groupNotFound
@@ -953,6 +1246,9 @@ final class SplitStore {
         if let auditEntry = ExpenseAuditEntry(groupID: groupID, event: event, isPending: true) {
             upsertAuditEntry(auditEntry)
         }
+        if let paymentAuditEntry = PaymentAuditEntry(groupID: groupID, event: event, isPending: true) {
+            upsertPaymentAuditEntry(paymentAuditEntry)
+        }
         persist()
     }
 
@@ -961,6 +1257,10 @@ final class SplitStore {
         if let index = auditEvents.firstIndex(where: { $0.id == eventID }) {
             auditEvents[index].isPending = false
             auditEvents[index].sequence = sequence ?? auditEvents[index].sequence
+        }
+        if let index = paymentAuditEvents.firstIndex(where: { $0.id == eventID }) {
+            paymentAuditEvents[index].isPending = false
+            paymentAuditEvents[index].sequence = sequence ?? paymentAuditEvents[index].sequence
         }
         persist()
     }
@@ -985,7 +1285,34 @@ final class SplitStore {
         return Array(entriesByID.values)
     }
 
+    private func upsertPaymentAuditEntry(_ auditEntry: PaymentAuditEntry) {
+        if let index = paymentAuditEvents.firstIndex(where: { $0.id == auditEntry.id }) {
+            paymentAuditEvents[index] = mergedPaymentAuditEntry(existing: paymentAuditEvents[index], incoming: auditEntry)
+        } else {
+            paymentAuditEvents.append(auditEntry)
+        }
+    }
+
+    private func deduplicatedPaymentAuditEvents(_ entries: [PaymentAuditEntry]) -> [PaymentAuditEntry] {
+        var entriesByID: [EventID: PaymentAuditEntry] = [:]
+        for entry in entries {
+            if let existingEntry = entriesByID[entry.id] {
+                entriesByID[entry.id] = mergedPaymentAuditEntry(existing: existingEntry, incoming: entry)
+            } else {
+                entriesByID[entry.id] = entry
+            }
+        }
+        return Array(entriesByID.values)
+    }
+
     private func mergedAuditEntry(existing: ExpenseAuditEntry, incoming: ExpenseAuditEntry) -> ExpenseAuditEntry {
+        var merged = incoming.isPending && !existing.isPending ? existing : incoming
+        merged.sequence = incoming.sequence ?? existing.sequence
+        merged.isPending = existing.isPending && incoming.isPending
+        return merged
+    }
+
+    private func mergedPaymentAuditEntry(existing: PaymentAuditEntry, incoming: PaymentAuditEntry) -> PaymentAuditEntry {
         var merged = incoming.isPending && !existing.isPending ? existing : incoming
         merged.sequence = incoming.sequence ?? existing.sequence
         merged.isPending = existing.isPending && incoming.isPending
@@ -1021,6 +1348,34 @@ final class SplitStore {
         }
     }
 
+    private func applyLocalPayment(event: LedgerEventRequest, groupID: GroupID) {
+        guard let payload = event.paymentPayload() else { return }
+
+        let paymentID = PaymentID(rawValue: event.entityID)
+        let now = Date()
+        let existingCreatedAt = payments.first(where: { $0.id == paymentID })?.createdAt ?? now
+        let payment = PaymentRecord(
+            id: paymentID,
+            groupID: groupID,
+            createdByActorID: event.actorID,
+            payload: payload,
+            createdAt: existingCreatedAt,
+            updatedAt: now,
+            version: event.baseSequence,
+            voidedAt: event.eventType == "payment.voided" ? event.eventCreatedAt : nil
+        )
+        upsertPayment(payment)
+        persist()
+    }
+
+    private func upsertPayment(_ payment: PaymentRecord) {
+        if let index = payments.firstIndex(where: { $0.id == payment.id }) {
+            payments[index] = payment
+        } else {
+            payments.append(payment)
+        }
+    }
+
     private func applyLocalGroupName(groupID: GroupID, name: String) {
         updateGroup(id: groupID) { group in
             group.name = name
@@ -1039,6 +1394,10 @@ final class SplitStore {
     private func applyCanonicalState(_ response: PostEventResponse, for event: LedgerEventRequest, groupID: GroupID) {
         if let serverExpense = response.expense {
             upsertExpense(ExpenseRecord(serverExpense: serverExpense))
+        }
+
+        if let serverPayment = response.payment {
+            upsertPayment(PaymentRecord(serverPayment: serverPayment))
         }
 
         if let serverGroup = response.group,
@@ -1228,6 +1587,7 @@ final class SplitStore {
 
     private func persist() {
         auditEvents = deduplicatedAuditEvents(auditEvents)
+        paymentAuditEvents = deduplicatedPaymentAuditEvents(paymentAuditEvents)
 
         do {
             let directoryURL = storageURL.deletingLastPathComponent()
@@ -1237,8 +1597,10 @@ final class SplitStore {
                 actors: actors,
                 groups: groups,
                 expenses: expenses,
+                payments: payments,
                 pendingOperations: pendingOperations,
                 auditEvents: auditEvents,
+                paymentAuditEvents: paymentAuditEvents,
                 groupBalances: groupBalances,
                 nextClientSequence: nextClientSequence
             )

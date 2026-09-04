@@ -20,6 +20,7 @@ var (
 	ErrCurrencyRateNotFound        = errors.New("currency rate is not available")
 	ErrInvalidCurrencyCode         = errors.New("invalid currency code")
 	ErrInvalidCurrencyRate         = errors.New("invalid currency rate")
+	ErrCurrencyConversionOverflow  = errors.New("currency conversion exceeds supported amount")
 	ErrCurrencyRateRefreshInFlight = errors.New("currency rate refresh is already in progress")
 )
 
@@ -50,6 +51,15 @@ type CurrencyRateSnapshot struct {
 type storedCurrencyRate struct {
 	QuoteCurrencyCode string
 	Rate              *big.Rat
+}
+
+// CurrencyAmountLock is the immutable conversion chosen for a monetary
+// ledger event when it is accepted by the server. ExchangeRateToUSD means
+// USD units per one unit of the event's native currency.
+type CurrencyAmountLock struct {
+	ExchangeRateToUSD   string
+	USDAmountMinorUnits int64
+	RateSnapshotDate    string
 }
 
 // NormalizeCurrencyCode canonicalizes an ISO-4217-style three-letter code.
@@ -360,6 +370,195 @@ func (database *Database) GetCurrencyRateSnapshot(
 		Source:           source,
 		FetchedAt:        fetchedAt,
 	}, nil
+}
+
+// resolveCurrencyAmountToUSDTx resolves the latest stored USD snapshot while
+// the ledger transaction is open. The provider stores quote units per USD, so
+// a native-currency amount is converted with the reciprocal rate. USD itself
+// is always an exact identity conversion and does not require a snapshot.
+func resolveCurrencyAmountToUSDTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	currencyCode string,
+	amountMinorUnits int64,
+) (CurrencyAmountLock, error) {
+	currencyCode, err := NormalizeCurrencyCode(currencyCode)
+	if err != nil {
+		return CurrencyAmountLock{}, err
+	}
+	if amountMinorUnits <= 0 {
+		return CurrencyAmountLock{}, fmt.Errorf("%w: amount must be positive", ErrInvalidCurrencyRate)
+	}
+	if currencyCode == "USD" {
+		return CurrencyAmountLock{
+			ExchangeRateToUSD:   "1",
+			USDAmountMinorUnits: amountMinorUnits,
+		}, nil
+	}
+
+	var snapshotDate, providerRateText string
+	err = tx.QueryRowContext(ctx, `
+		WITH latest_snapshot AS (
+			SELECT snapshot_date
+			FROM currency_rates
+			WHERE base_currency_code = 'USD'
+				AND quote_currency_code = $1
+			GROUP BY snapshot_date
+			ORDER BY snapshot_date DESC
+			LIMIT 1
+		)
+		SELECT rates.snapshot_date::text, rates.rate::text
+		FROM currency_rates AS rates
+		JOIN latest_snapshot
+			ON latest_snapshot.snapshot_date = rates.snapshot_date
+		WHERE rates.base_currency_code = 'USD'
+			AND rates.quote_currency_code = $1`, currencyCode).Scan(&snapshotDate, &providerRateText)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CurrencyAmountLock{}, fmt.Errorf("%w: %s", ErrCurrencyRateNotFound, currencyCode)
+	}
+	if err != nil {
+		return CurrencyAmountLock{}, fmt.Errorf("load %s to USD rate: %w", currencyCode, err)
+	}
+
+	providerRate, ok := new(big.Rat).SetString(providerRateText)
+	if !ok || providerRate.Sign() <= 0 {
+		return CurrencyAmountLock{}, fmt.Errorf("%w: stored rate for %s is invalid", ErrInvalidCurrencyRate, currencyCode)
+	}
+	rateToUSD := new(big.Rat).Quo(big.NewRat(1, 1), providerRate)
+	rateText := formatCurrencyRate(rateToUSD)
+	storedRate, ok := new(big.Rat).SetString(rateText)
+	if !ok {
+		return CurrencyAmountLock{}, fmt.Errorf("%w: calculated rate for %s is invalid", ErrInvalidCurrencyRate, currencyCode)
+	}
+	usdAmountMinorUnits, err := roundCurrencyAmount(amountMinorUnits, storedRate)
+	if err != nil {
+		return CurrencyAmountLock{}, err
+	}
+
+	return CurrencyAmountLock{
+		ExchangeRateToUSD:   rateText,
+		USDAmountMinorUnits: usdAmountMinorUnits,
+		RateSnapshotDate:    snapshotDate,
+	}, nil
+}
+
+func roundCurrencyAmount(amountMinorUnits int64, rate *big.Rat) (int64, error) {
+	if amountMinorUnits <= 0 || rate == nil || rate.Sign() <= 0 {
+		return 0, fmt.Errorf("%w: amount and rate must be positive", ErrInvalidCurrencyRate)
+	}
+
+	numerator := new(big.Int).Mul(big.NewInt(amountMinorUnits), rate.Num())
+	quotient, remainder := new(big.Int), new(big.Int)
+	quotient.QuoRem(numerator, rate.Denom(), remainder)
+	if new(big.Int).Lsh(remainder, 1).Cmp(rate.Denom()) >= 0 {
+		quotient.Add(quotient, big.NewInt(1))
+	}
+	if !quotient.IsInt64() {
+		return 0, ErrCurrencyConversionOverflow
+	}
+	return quotient.Int64(), nil
+}
+
+func currencyLockFromEvent(event LedgerEvent) (CurrencyAmountLock, error) {
+	rateText := strings.TrimSpace(event.ExchangeRateToUSD)
+	rate, ok := new(big.Rat).SetString(rateText)
+	if !ok || rate.Sign() <= 0 {
+		return CurrencyAmountLock{}, fmt.Errorf("%w: ledger event has an invalid exchange rate", ErrInvalidCurrencyRate)
+	}
+	if event.USDAmountMinorUnits < 0 {
+		return CurrencyAmountLock{}, fmt.Errorf("%w: ledger event has a negative USD amount", ErrInvalidCurrencyRate)
+	}
+	if event.RateSnapshotDate != "" {
+		if err := validateCurrencyRateDate(event.RateSnapshotDate, "rate_snapshot_date"); err != nil {
+			return CurrencyAmountLock{}, err
+		}
+	}
+	return CurrencyAmountLock{
+		ExchangeRateToUSD:   rateText,
+		USDAmountMinorUnits: event.USDAmountMinorUnits,
+		RateSnapshotDate:    event.RateSnapshotDate,
+	}, nil
+}
+
+func nullableRateSnapshotDate(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+// allocateLockedUSDSplits assigns the locked expense total to its native
+// currency splits. The largest-remainder rule makes the result deterministic,
+// preserves the exact locked total, and remains stable across retries.
+func allocateLockedUSDSplits(totalMinorUnits, usdTotalMinorUnits int64, splits []ExpensePayloadSplit) ([]int64, error) {
+	if totalMinorUnits <= 0 || usdTotalMinorUnits < 0 {
+		return nil, fmt.Errorf("%w: invalid expense currency lock", ErrInvalidCurrencyRate)
+	}
+
+	var splitTotal int64
+	for _, split := range splits {
+		if split.AmountMinorUnits < 0 {
+			return nil, fmt.Errorf("%w: split amount cannot be negative", ErrInvalidExpensePayload)
+		}
+		var err error
+		splitTotal, err = addInt64(splitTotal, split.AmountMinorUnits)
+		if err != nil {
+			return nil, fmt.Errorf("%w: split total overflow", ErrCurrencyConversionOverflow)
+		}
+	}
+	if splitTotal != totalMinorUnits {
+		return nil, fmt.Errorf("%w: split amounts must equal total_minor_units", ErrInvalidExpensePayload)
+	}
+
+	type splitRemainder struct {
+		index     int
+		remainder *big.Int
+	}
+
+	denominator := big.NewInt(totalMinorUnits)
+	allocated := make([]int64, len(splits))
+	remainders := make([]splitRemainder, 0, len(splits))
+	var floorTotal int64
+	for index, split := range splits {
+		numerator := new(big.Int).Mul(big.NewInt(usdTotalMinorUnits), big.NewInt(split.AmountMinorUnits))
+		quotient, remainder := new(big.Int), new(big.Int)
+		quotient.QuoRem(numerator, denominator, remainder)
+		if !quotient.IsInt64() {
+			return nil, ErrCurrencyConversionOverflow
+		}
+		allocated[index] = quotient.Int64()
+		var err error
+		floorTotal, err = addInt64(floorTotal, allocated[index])
+		if err != nil {
+			return nil, fmt.Errorf("%w: split allocation overflow", ErrCurrencyConversionOverflow)
+		}
+		remainders = append(remainders, splitRemainder{index: index, remainder: remainder})
+	}
+
+	if floorTotal > usdTotalMinorUnits {
+		return nil, fmt.Errorf("%w: split allocation exceeded locked total", ErrCurrencyConversionOverflow)
+	}
+	remaining := usdTotalMinorUnits - floorTotal
+	sort.Slice(remainders, func(i, j int) bool {
+		comparison := remainders[i].remainder.Cmp(remainders[j].remainder)
+		if comparison != 0 {
+			return comparison > 0
+		}
+		return splits[remainders[i].index].ActorUUID < splits[remainders[j].index].ActorUUID
+	})
+	if remaining > int64(len(remainders)) {
+		return nil, fmt.Errorf("%w: split allocation remainder is invalid", ErrCurrencyConversionOverflow)
+	}
+	for index := int64(0); index < remaining; index++ {
+		splitIndex := remainders[index].index
+		var err error
+		allocated[splitIndex], err = addInt64(allocated[splitIndex], 1)
+		if err != nil {
+			return nil, fmt.Errorf("%w: split allocation overflow", ErrCurrencyConversionOverflow)
+		}
+	}
+
+	return allocated, nil
 }
 
 func normalizeCurrencyQuoteFilter(quotes []string) ([]string, error) {

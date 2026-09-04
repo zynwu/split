@@ -213,6 +213,14 @@ func writeLedgerEventError(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusConflict, map[string]string{
 			"error": "ledger event conflicts with an existing event",
 		})
+	case errors.Is(err, database.ErrCurrencyRatesNotFound), errors.Is(err, database.ErrCurrencyRateNotFound):
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "currency conversion rates are not available; try again later",
+		})
+	case errors.Is(err, database.ErrCurrencyConversionOverflow):
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": err.Error(),
+		})
 	case errors.Is(err, database.ErrInvalidExpensePayload), errors.Is(err, database.ErrUnsupportedEvent):
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": err.Error(),

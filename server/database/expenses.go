@@ -27,9 +27,15 @@ var (
 )
 
 type ExpenseSplit struct {
+	ActorUUID           string `json:"actor_uuid"`
+	AmountMinorUnits    int64  `json:"amount_minor_units"`
+	USDAmountMinorUnits int64  `json:"usd_amount_minor_units"`
+	DeviceID            string `json:"device_id,omitempty"`
+}
+
+type ExpensePayloadSplit struct {
 	ActorUUID        string `json:"actor_uuid"`
 	AmountMinorUnits int64  `json:"amount_minor_units"`
-	DeviceID         string `json:"device_id,omitempty"`
 }
 
 type Expense struct {
@@ -42,6 +48,9 @@ type Expense struct {
 	Description         string          `json:"description"`
 	CurrencyCode        string          `json:"currency_code"`
 	TotalMinorUnits     int64           `json:"total_minor_units"`
+	ExchangeRateToUSD   string          `json:"exchange_rate_to_usd"`
+	USDTotalMinorUnits  int64           `json:"usd_total_minor_units"`
+	RateSnapshotDate    string          `json:"rate_snapshot_date,omitempty"`
 	SplitMethod         string          `json:"split_method"`
 	SplitConfig         json.RawMessage `json:"split_config"`
 	OccurredAt          time.Time       `json:"occurred_at"`
@@ -53,15 +62,15 @@ type Expense struct {
 }
 
 type ExpenseEventPayload struct {
-	Name            string          `json:"name"`
-	Description     string          `json:"description"`
-	CurrencyCode    string          `json:"currency_code"`
-	TotalMinorUnits int64           `json:"total_minor_units"`
-	PayerActorUUID  string          `json:"payer_actor_uuid"`
-	SplitMethod     string          `json:"split_method"`
-	SplitConfig     json.RawMessage `json:"split_config"`
-	OccurredAt      time.Time       `json:"occurred_at"`
-	Splits          []ExpenseSplit  `json:"splits"`
+	Name            string                `json:"name"`
+	Description     string                `json:"description"`
+	CurrencyCode    string                `json:"currency_code"`
+	TotalMinorUnits int64                 `json:"total_minor_units"`
+	PayerActorUUID  string                `json:"payer_actor_uuid"`
+	SplitMethod     string                `json:"split_method"`
+	SplitConfig     json.RawMessage       `json:"split_config"`
+	OccurredAt      time.Time             `json:"occurred_at"`
+	Splits          []ExpensePayloadSplit `json:"splits"`
 }
 
 type GroupNameEventPayload struct {
@@ -91,22 +100,25 @@ type LedgerEventInput struct {
 }
 
 type LedgerEvent struct {
-	EventUUID      string          `json:"event_uuid"`
-	GroupUUID      string          `json:"group_uuid"`
-	Sequence       int64           `json:"sequence"`
-	EntityType     string          `json:"entity_type"`
-	EntityUUID     string          `json:"entity_uuid"`
-	EventType      string          `json:"event_type"`
-	ActorUUID      string          `json:"actor_uuid"`
-	EventCreatedAt time.Time       `json:"event_created_at"`
-	DeviceID       string          `json:"device_id"`
-	ClientSequence int64           `json:"client_sequence"`
-	BaseSequence   int64           `json:"base_sequence"`
-	HadConflict    bool            `json:"had_conflict"`
-	PayloadVersion int             `json:"payload_version"`
-	Payload        json.RawMessage `json:"payload"`
-	RecordedAt     time.Time       `json:"recorded_at"`
-	PayloadHash    []byte          `json:"-"`
+	EventUUID           string          `json:"event_uuid"`
+	GroupUUID           string          `json:"group_uuid"`
+	Sequence            int64           `json:"sequence"`
+	EntityType          string          `json:"entity_type"`
+	EntityUUID          string          `json:"entity_uuid"`
+	EventType           string          `json:"event_type"`
+	ActorUUID           string          `json:"actor_uuid"`
+	EventCreatedAt      time.Time       `json:"event_created_at"`
+	DeviceID            string          `json:"device_id"`
+	ClientSequence      int64           `json:"client_sequence"`
+	BaseSequence        int64           `json:"base_sequence"`
+	HadConflict         bool            `json:"had_conflict"`
+	PayloadVersion      int             `json:"payload_version"`
+	Payload             json.RawMessage `json:"payload"`
+	ExchangeRateToUSD   string          `json:"exchange_rate_to_usd,omitempty"`
+	USDAmountMinorUnits int64           `json:"usd_amount_minor_units,omitempty"`
+	RateSnapshotDate    string          `json:"rate_snapshot_date,omitempty"`
+	RecordedAt          time.Time       `json:"recorded_at"`
+	PayloadHash         []byte          `json:"-"`
 }
 
 type AppendLedgerEventResult struct {
@@ -335,9 +347,33 @@ func (database *Database) AppendLedgerEvent(ctx context.Context, deviceID string
 	hadConflict := normalized.input.BaseSequence != currentSequence || (currentSequence > 0 && !winningEvent)
 	nextSequence := currentGroupSequence + 1
 	recordedAt := time.Now().UTC()
+	var currencyLock *CurrencyAmountLock
+	if normalized.expensePayload != nil {
+		lock, lockErr := resolveCurrencyAmountToUSDTx(
+			ctx,
+			tx,
+			normalized.expensePayload.CurrencyCode,
+			normalized.expensePayload.TotalMinorUnits,
+		)
+		if lockErr != nil {
+			return AppendLedgerEventResult{}, lockErr
+		}
+		currencyLock = &lock
+	} else if normalized.paymentPayload != nil {
+		lock, lockErr := resolveCurrencyAmountToUSDTx(
+			ctx,
+			tx,
+			normalized.paymentPayload.CurrencyCode,
+			normalized.paymentPayload.AmountMinorUnits,
+		)
+		if lockErr != nil {
+			return AppendLedgerEventResult{}, lockErr
+		}
+		currencyLock = &lock
+	}
 
 	var event LedgerEvent
-	inserted, err := insertLedgerEventTx(ctx, tx, normalized.input, deviceID, nextSequence, hadConflict, eventHash[:], recordedAt, &event)
+	inserted, err := insertLedgerEventTx(ctx, tx, normalized.input, deviceID, nextSequence, hadConflict, eventHash[:], currencyLock, recordedAt, &event)
 	if err != nil {
 		return AppendLedgerEventResult{}, err
 	}
@@ -469,20 +505,34 @@ func insertLedgerEventTx(
 	sequence int64,
 	hadConflict bool,
 	payloadHash []byte,
+	currencyLock *CurrencyAmountLock,
 	recordedAt time.Time,
 	event *LedgerEvent,
 ) (bool, error) {
+	var exchangeRateToUSD any
+	var usdAmountMinorUnits any
+	var rateSnapshotDate any
+	if currencyLock != nil {
+		exchangeRateToUSD = currencyLock.ExchangeRateToUSD
+		usdAmountMinorUnits = currencyLock.USDAmountMinorUnits
+		if currencyLock.RateSnapshotDate != "" {
+			rateSnapshotDate = currencyLock.RateSnapshotDate
+		}
+	}
+
 	err := scanLedgerEvent(tx.QueryRowContext(ctx, `
 		INSERT INTO ledger_events (
 			event_uuid, group_uuid, sequence, entity_type, entity_uuid,
 			event_type, actor_uuid, device_id, client_sequence, base_sequence,
-			event_created_at, had_conflict, payload_version, payload_hash, payload, recorded_at
+			event_created_at, had_conflict, payload_version, payload_hash, payload,
+			exchange_rate_to_usd, usd_amount_minor_units, rate_snapshot_date, recorded_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
 		ON CONFLICT DO NOTHING
 		RETURNING event_uuid, group_uuid, sequence, entity_type, entity_uuid,
 			event_type, actor_uuid, device_id, client_sequence, base_sequence,
-			event_created_at, had_conflict, payload_version, payload_hash, payload, recorded_at`,
+			event_created_at, had_conflict, payload_version, payload_hash, payload,
+			exchange_rate_to_usd::text, usd_amount_minor_units, rate_snapshot_date::text, recorded_at`,
 		input.EventUUID,
 		input.GroupUUID,
 		sequence,
@@ -498,6 +548,9 @@ func insertLedgerEventTx(
 		input.PayloadVersion,
 		payloadHash,
 		input.Payload,
+		exchangeRateToUSD,
+		usdAmountMinorUnits,
+		rateSnapshotDate,
 		recordedAt,
 	), event)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -569,7 +622,9 @@ func (database *Database) ListExpensesForDevice(ctx context.Context, groupUUID, 
 		SELECT e.expense_uuid, e.group_uuid, e.created_by_actor_uuid,
 			e.created_by_device_id, e.payer_actor_uuid,
 			e.name, e.description, e.currency_code,
-			e.total_minor_units, e.split_method, e.split_config,
+			e.total_minor_units, COALESCE(e.exchange_rate_to_usd::text, ''),
+			e.usd_total_minor_units, COALESCE(e.rate_snapshot_date::text, ''),
+			e.split_method, e.split_config,
 			e.occurred_at, e.created_at, e.updated_at,
 			e.latest_event_sequence, e.voided_at,
 			COALESCE(
@@ -577,6 +632,7 @@ func (database *Database) ListExpensesForDevice(ctx context.Context, groupUUID, 
 					jsonb_build_object(
 						'actor_uuid', s.actor_uuid,
 						'amount_minor_units', s.amount_minor_units,
+						'usd_amount_minor_units', s.usd_amount_minor_units,
 						'device_id', s.device_id
 					)
 					ORDER BY s.actor_uuid
@@ -591,7 +647,8 @@ func (database *Database) ListExpensesForDevice(ctx context.Context, groupUUID, 
 		GROUP BY e.expense_uuid, e.group_uuid, e.created_by_actor_uuid,
 			e.created_by_device_id, e.payer_actor_uuid,
 			e.name, e.description, e.currency_code,
-			e.total_minor_units, e.split_method, e.split_config,
+			e.total_minor_units, e.exchange_rate_to_usd, e.usd_total_minor_units,
+			e.rate_snapshot_date, e.split_method, e.split_config,
 			e.occurred_at, e.created_at, e.updated_at,
 			e.latest_event_sequence, e.voided_at
 		ORDER BY e.occurred_at, e.expense_uuid`
@@ -617,6 +674,9 @@ func (database *Database) ListExpensesForDevice(ctx context.Context, groupUUID, 
 			&expense.Description,
 			&expense.CurrencyCode,
 			&expense.TotalMinorUnits,
+			&expense.ExchangeRateToUSD,
+			&expense.USDTotalMinorUnits,
+			&expense.RateSnapshotDate,
 			&expense.SplitMethod,
 			&splitConfig,
 			&expense.OccurredAt,
@@ -686,7 +746,8 @@ func (database *Database) ListLedgerEventsForDevice(ctx context.Context, groupUU
 	rows, err := tx.QueryContext(ctx, `
 		SELECT event_uuid, group_uuid, sequence, entity_type, entity_uuid,
 			event_type, actor_uuid, device_id, client_sequence, base_sequence,
-			event_created_at, had_conflict, payload_version, payload_hash, payload, recorded_at
+			event_created_at, had_conflict, payload_version, payload_hash, payload,
+			exchange_rate_to_usd::text, usd_amount_minor_units, rate_snapshot_date::text, recorded_at
 		FROM ledger_events
 		WHERE group_uuid = $1
 			AND sequence > $2
@@ -943,9 +1004,6 @@ func normalizeExpensePayload(payload *ExpenseEventPayload) error {
 		}
 		seenActors[actorUUID] = struct{}{}
 		payload.Splits[index].ActorUUID = actorUUID
-		// The server records the authenticated event device. A client cannot
-		// select provenance by putting a device_id in the expense payload.
-		payload.Splits[index].DeviceID = ""
 		if payload.SplitMethod == "manual" && payload.Splits[index].AmountMinorUnits < 0 {
 			return fmt.Errorf("%w: split amounts must be non-negative", ErrInvalidExpensePayload)
 		}
@@ -990,7 +1048,7 @@ func validateExpenseActorsTx(ctx context.Context, tx *sql.Tx, groupUUID string, 
 	}
 	payload.PayerActorUUID = resolvedPayerActorUUID
 
-	resolvedSplits := make([]ExpenseSplit, 0, len(payload.Splits))
+	resolvedSplits := make([]ExpensePayloadSplit, 0, len(payload.Splits))
 	splitIndexes := make(map[string]int, len(payload.Splits))
 	for _, split := range payload.Splits {
 		resolvedActorUUID, err := resolveActorUUIDTx(ctx, tx, groupUUID, split.ActorUUID)
@@ -1057,7 +1115,21 @@ func applyActorDisplayNameTx(ctx context.Context, tx *sql.Tx, event LedgerEvent,
 }
 
 func applyExpenseUpsertTx(ctx context.Context, tx *sql.Tx, event LedgerEvent, payload ExpenseEventPayload) error {
-	_, err := loadExpenseTx(ctx, tx, event.GroupUUID, event.EntityUUID)
+	currencyLock, err := currencyLockFromEvent(event)
+	if err != nil {
+		return err
+	}
+	usdSplitAmounts, err := allocateLockedUSDSplits(
+		payload.TotalMinorUnits,
+		currencyLock.USDAmountMinorUnits,
+		payload.Splits,
+	)
+	if err != nil {
+		return err
+	}
+	rateSnapshotDate := nullableRateSnapshotDate(currencyLock.RateSnapshotDate)
+
+	_, err = loadExpenseTx(ctx, tx, event.GroupUUID, event.EntityUUID)
 	if err != nil && !errors.Is(err, ErrExpenseNotFound) {
 		return err
 	}
@@ -1067,11 +1139,12 @@ func applyExpenseUpsertTx(ctx context.Context, tx *sql.Tx, event LedgerEvent, pa
 			INSERT INTO expenses (
 				expense_uuid, group_uuid, created_by_actor_uuid, created_by_device_id,
 				payer_actor_uuid,
-				name, description, currency_code, total_minor_units, split_method,
-				split_config, occurred_at, created_at, updated_at,
+				name, description, currency_code, total_minor_units,
+				exchange_rate_to_usd, usd_total_minor_units, rate_snapshot_date,
+				split_method, split_config, occurred_at, created_at, updated_at,
 				latest_event_sequence, voided_at
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $14, NULL)`,
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $16, $17, NULL)`,
 			event.EntityUUID,
 			event.GroupUUID,
 			event.ActorUUID,
@@ -1081,6 +1154,9 @@ func applyExpenseUpsertTx(ctx context.Context, tx *sql.Tx, event LedgerEvent, pa
 			payload.Description,
 			payload.CurrencyCode,
 			payload.TotalMinorUnits,
+			currencyLock.ExchangeRateToUSD,
+			currencyLock.USDAmountMinorUnits,
+			rateSnapshotDate,
 			payload.SplitMethod,
 			payload.SplitConfig,
 			payload.OccurredAt,
@@ -1098,11 +1174,14 @@ func applyExpenseUpsertTx(ctx context.Context, tx *sql.Tx, event LedgerEvent, pa
 				description = $5,
 				currency_code = $6,
 				total_minor_units = $7,
-				split_method = $8,
-				split_config = $9,
-				occurred_at = $10,
-				updated_at = $11,
-				latest_event_sequence = $12,
+				exchange_rate_to_usd = $8,
+				usd_total_minor_units = $9,
+				rate_snapshot_date = $10,
+				split_method = $11,
+				split_config = $12,
+				occurred_at = $13,
+				updated_at = $14,
+				latest_event_sequence = $15,
 				voided_at = NULL
 			WHERE expense_uuid = $1 AND group_uuid = $2`,
 			event.EntityUUID,
@@ -1112,6 +1191,9 @@ func applyExpenseUpsertTx(ctx context.Context, tx *sql.Tx, event LedgerEvent, pa
 			payload.Description,
 			payload.CurrencyCode,
 			payload.TotalMinorUnits,
+			currencyLock.ExchangeRateToUSD,
+			currencyLock.USDAmountMinorUnits,
+			rateSnapshotDate,
 			payload.SplitMethod,
 			payload.SplitConfig,
 			payload.OccurredAt,
@@ -1128,10 +1210,20 @@ func applyExpenseUpsertTx(ctx context.Context, tx *sql.Tx, event LedgerEvent, pa
 		WHERE expense_uuid = $1 AND group_uuid = $2`, event.EntityUUID, event.GroupUUID); err != nil {
 		return fmt.Errorf("replace expense splits: %w", err)
 	}
-	for _, split := range payload.Splits {
+	for index, split := range payload.Splits {
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO expense_splits (group_uuid, expense_uuid, actor_uuid, amount_minor_units, device_id)
-			VALUES ($1, $2, $3, $4, $5)`, event.GroupUUID, event.EntityUUID, split.ActorUUID, split.AmountMinorUnits, event.DeviceID); err != nil {
+			INSERT INTO expense_splits (
+				group_uuid, expense_uuid, actor_uuid, amount_minor_units,
+				usd_amount_minor_units, device_id
+			)
+			VALUES ($1, $2, $3, $4, $5, $6)`,
+			event.GroupUUID,
+			event.EntityUUID,
+			split.ActorUUID,
+			split.AmountMinorUnits,
+			usdSplitAmounts[index],
+			event.DeviceID,
+		); err != nil {
 			return fmt.Errorf("insert expense split: %w", err)
 		}
 	}
@@ -1214,7 +1306,8 @@ func loadExpense(ctx context.Context, queryer sqlQueryer, groupUUID, expenseUUID
 	err := queryer.QueryRowContext(ctx, `
 		SELECT expense_uuid, group_uuid, created_by_actor_uuid, created_by_device_id,
 			payer_actor_uuid, name, description, currency_code,
-			total_minor_units, split_method,
+			total_minor_units, exchange_rate_to_usd::text, usd_total_minor_units,
+			COALESCE(rate_snapshot_date::text, ''), split_method,
 			split_config, occurred_at, created_at, updated_at,
 			latest_event_sequence, voided_at
 		FROM expenses
@@ -1228,6 +1321,9 @@ func loadExpense(ctx context.Context, queryer sqlQueryer, groupUUID, expenseUUID
 		&expense.Description,
 		&expense.CurrencyCode,
 		&expense.TotalMinorUnits,
+		&expense.ExchangeRateToUSD,
+		&expense.USDTotalMinorUnits,
+		&expense.RateSnapshotDate,
 		&expense.SplitMethod,
 		&splitConfig,
 		&expense.OccurredAt,
@@ -1246,7 +1342,7 @@ func loadExpense(ctx context.Context, queryer sqlQueryer, groupUUID, expenseUUID
 	expense.SplitConfig = append(json.RawMessage(nil), splitConfig...)
 	expense.Splits = make([]ExpenseSplit, 0)
 	rows, err := queryer.QueryContext(ctx, `
-		SELECT actor_uuid, amount_minor_units, device_id
+		SELECT actor_uuid, amount_minor_units, usd_amount_minor_units, device_id
 		FROM expense_splits
 		WHERE group_uuid = $1 AND expense_uuid = $2
 		ORDER BY actor_uuid`, groupUUID, expenseUUID)
@@ -1256,7 +1352,12 @@ func loadExpense(ctx context.Context, queryer sqlQueryer, groupUUID, expenseUUID
 	defer rows.Close()
 	for rows.Next() {
 		var split ExpenseSplit
-		if err := rows.Scan(&split.ActorUUID, &split.AmountMinorUnits, &split.DeviceID); err != nil {
+		if err := rows.Scan(
+			&split.ActorUUID,
+			&split.AmountMinorUnits,
+			&split.USDAmountMinorUnits,
+			&split.DeviceID,
+		); err != nil {
 			return Expense{}, fmt.Errorf("scan expense split: %w", err)
 		}
 		expense.Splits = append(expense.Splits, split)
@@ -1364,7 +1465,8 @@ func findLedgerEventByUUIDTx(ctx context.Context, tx *sql.Tx, eventUUID string) 
 	err := scanLedgerEvent(tx.QueryRowContext(ctx, `
 		SELECT event_uuid, group_uuid, sequence, entity_type, entity_uuid,
 			event_type, actor_uuid, device_id, client_sequence, base_sequence,
-			event_created_at, had_conflict, payload_version, payload_hash, payload, recorded_at
+			event_created_at, had_conflict, payload_version, payload_hash, payload,
+			exchange_rate_to_usd::text, usd_amount_minor_units, rate_snapshot_date::text, recorded_at
 		FROM ledger_events
 		WHERE event_uuid = $1`, eventUUID), &event)
 	return event, err
@@ -1375,7 +1477,8 @@ func findLedgerEventByClientSequenceTx(ctx context.Context, tx *sql.Tx, deviceID
 	err := scanLedgerEvent(tx.QueryRowContext(ctx, `
 		SELECT event_uuid, group_uuid, sequence, entity_type, entity_uuid,
 			event_type, actor_uuid, device_id, client_sequence, base_sequence,
-			event_created_at, had_conflict, payload_version, payload_hash, payload, recorded_at
+			event_created_at, had_conflict, payload_version, payload_hash, payload,
+			exchange_rate_to_usd::text, usd_amount_minor_units, rate_snapshot_date::text, recorded_at
 		FROM ledger_events
 		WHERE device_id = $1 AND client_sequence = $2`, deviceID, clientSequence), &event)
 	return event, err
@@ -1404,6 +1507,9 @@ type rowScanner interface {
 
 func scanLedgerEvent(scanner rowScanner, event *LedgerEvent) error {
 	var payload []byte
+	var exchangeRateToUSD sql.NullString
+	var usdAmountMinorUnits sql.NullInt64
+	var rateSnapshotDate sql.NullString
 	err := scanner.Scan(
 		&event.EventUUID,
 		&event.GroupUUID,
@@ -1420,12 +1526,24 @@ func scanLedgerEvent(scanner rowScanner, event *LedgerEvent) error {
 		&event.PayloadVersion,
 		&event.PayloadHash,
 		&payload,
+		&exchangeRateToUSD,
+		&usdAmountMinorUnits,
+		&rateSnapshotDate,
 		&event.RecordedAt,
 	)
 	if err != nil {
 		return err
 	}
 	event.Payload = append(json.RawMessage(nil), payload...)
+	if exchangeRateToUSD.Valid {
+		event.ExchangeRateToUSD = exchangeRateToUSD.String
+	}
+	if usdAmountMinorUnits.Valid {
+		event.USDAmountMinorUnits = usdAmountMinorUnits.Int64
+	}
+	if rateSnapshotDate.Valid {
+		event.RateSnapshotDate = rateSnapshotDate.String
+	}
 	return nil
 }
 

@@ -251,6 +251,7 @@ func (database *Database) CommandeerActor(
 		group.LatestEventSequence+1,
 		false,
 		payloadHash[:],
+		nil,
 		recordedAt,
 		&event,
 	)
@@ -550,7 +551,7 @@ func redirectExpenseActorsTx(ctx context.Context, tx *sql.Tx, groupUUID, sourceA
 		}
 
 		splitRows, err := tx.QueryContext(ctx, `
-			SELECT actor_uuid, amount_minor_units, device_id
+			SELECT actor_uuid, amount_minor_units, usd_amount_minor_units, device_id
 			FROM expense_splits
 			WHERE group_uuid = $1
 				AND expense_uuid = $2
@@ -564,7 +565,12 @@ func redirectExpenseActorsTx(ctx context.Context, tx *sql.Tx, groupUUID, sourceA
 		var sourceSplit, targetSplit *ExpenseSplit
 		for splitRows.Next() {
 			var split ExpenseSplit
-			if err := splitRows.Scan(&split.ActorUUID, &split.AmountMinorUnits, &split.DeviceID); err != nil {
+			if err := splitRows.Scan(
+				&split.ActorUUID,
+				&split.AmountMinorUnits,
+				&split.USDAmountMinorUnits,
+				&split.DeviceID,
+			); err != nil {
 				splitRows.Close()
 				return fmt.Errorf("scan expense split for actor merge: %w", err)
 			}
@@ -597,11 +603,16 @@ func redirectExpenseActorsTx(ctx context.Context, tx *sql.Tx, groupUUID, sourceA
 			if err != nil {
 				return fmt.Errorf("combine expense split amounts: %w", err)
 			}
+			combinedUSDAmount, err := addInt64(sourceSplit.USDAmountMinorUnits, targetSplit.USDAmountMinorUnits)
+			if err != nil {
+				return fmt.Errorf("combine USD expense split amounts: %w", err)
+			}
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE expense_splits
-				SET amount_minor_units = $3
-				WHERE group_uuid = $1 AND expense_uuid = $2 AND actor_uuid = $4`,
-				groupUUID, expenseUUID, combinedAmount, targetActorUUID); err != nil {
+				SET amount_minor_units = $3,
+					usd_amount_minor_units = $4
+				WHERE group_uuid = $1 AND expense_uuid = $2 AND actor_uuid = $5`,
+				groupUUID, expenseUUID, combinedAmount, combinedUSDAmount, targetActorUUID); err != nil {
 				return fmt.Errorf("combine target expense split: %w", err)
 			}
 			if _, err := tx.ExecContext(ctx, `

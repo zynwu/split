@@ -150,7 +150,7 @@ the API starts. A failed refresh is retried every 15 minutes. The default
 source is the keyless Frankfurter v2 rates feed, and the source URL can be
 replaced with a compatible endpoint through configuration.
 
-The stored base is USD by default. Rates are exact decimal strings: a rate of
+The ledger settlement base is USD. Rates are exact decimal strings: a rate of
 `1.3841` means one USD equals 1.3841 CAD. The API can derive a cross-rate from
 the stored base, so clients can request CAD-to-EUR without the server storing a
 second provider snapshot.
@@ -200,10 +200,20 @@ CURRENCY_RATES_SOURCE_URL=https://api.frankfurter.dev/v2/rates
 CURRENCY_RATES_TIMEZONE=America/Los_Angeles
 ```
 
-Rates are currently an independent read service; expenses, payments, and
-balances continue to use their recorded native currencies. A later balancing
-change can use this endpoint without changing the ledger schema or historical
-amounts.
+Every accepted expense locks its conversion immediately using the newest stored
+USD snapshot available at ingestion. The expense and its ledger event retain
+`exchange_rate_to_usd` (USD units per one native-currency unit),
+`usd_total_minor_units`, and `rate_snapshot_date`. USD expenses use an exact
+rate of `1` and need no snapshot date. The native amount and currency remain
+available for display, but balances use only the locked USD values, so a later
+daily refresh cannot change an existing debt. Each split also stores its
+deterministically allocated `usd_amount_minor_units`, ensuring the split debits
+sum exactly to the locked expense total.
+
+Payments use the same lock so a non-USD settlement can offset the all-USD
+balance consistently. Editing an expense or payment creates a new ledger event
+and locks the replacement amount at that event's ingestion time; retrying the
+same event UUID replays its original lock.
 
 ### Expense ledger
 
@@ -250,9 +260,9 @@ curl -X POST "http://localhost:8080/api/groups/<group-uuid>/events" \
 ```
 
 The event response includes the current `payment` projection. `from_actor_uuid`
-is debited and `to_actor_uuid` is credited by the payment amount. Payments are
-kept in their native currency. Read all payment records, including voided
-history, with:
+is debited and `to_actor_uuid` is credited by the payment amount. Payments keep
+their native amount for display and also return the locked USD amount. Read all
+payment records, including voided history, with:
 
 ```sh
 curl "http://localhost:8080/api/groups/<group-uuid>/payments" \
@@ -305,7 +315,8 @@ three-letter code such as `USD` or `EUR`.
 `event_created_at` is the client-side time at which the event was created;
 `recorded_at` in the returned ledger event is when the server received it.
 The expense projection's `created_at` and `updated_at` reflect the winning
-event's creation time.
+event's creation time. The server-owned currency-lock fields are not part of
+the client payload and must not be supplied or recomputed by the client.
 
 Use the expense projection for the current group state:
 
@@ -321,12 +332,11 @@ curl "http://localhost:8080/api/groups/<group-uuid>/balances" \
   -H 'Authorization: Bearer <auth_token-from-register>'
 ```
 
-The response contains an `as_of_sequence` watermark and one balance bucket per
-currency. A positive `net_minor_units` means the group owes that actor; a
-negative value means the actor owes the group. `suggested_transfers` reduces
-those net balances into direct payments. The current default is USD when a
-group has no expenses, while expenses in other currencies remain in separate
-native-currency buckets until exchange-rate conversion is introduced.
+The response contains an `as_of_sequence` watermark and one USD balance bucket.
+A positive `net_minor_units` means the group owes that actor; a negative value
+means the actor owes the group. `suggested_transfers` reduces those net
+balances into direct USD payments. Native-currency expenses are included using
+their immutable locked USD values.
 
 Expense responses include `created_by_actor_uuid` with its
 `created_by_device_id`; each current split also includes the device that
@@ -439,7 +449,10 @@ closed, and new active bindings point at the surviving actor. Transactions
 reference both actor and device provenance: expenses expose creator and split
 device IDs, while payments expose their creator device ID. The current
 `payments` projection stores one-to-one settlements; its immutable create, edit,
-void, and commandeering history remains in `ledger_events`.
+void, and commandeering history remains in `ledger_events`. Monetary
+projections retain both their native amount/currency and immutable USD lock
+fields; pre-existing non-USD data cannot be migrated without its original
+server-time rate.
 
 Stop the containers with:
 

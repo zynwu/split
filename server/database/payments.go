@@ -22,6 +22,9 @@ type Payment struct {
 	ToActorUUID         string     `json:"to_actor_uuid"`
 	CurrencyCode        string     `json:"currency_code"`
 	AmountMinorUnits    int64      `json:"amount_minor_units"`
+	ExchangeRateToUSD   string     `json:"exchange_rate_to_usd"`
+	USDAmountMinorUnits int64      `json:"usd_amount_minor_units"`
+	RateSnapshotDate    string     `json:"rate_snapshot_date,omitempty"`
 	OccurredAt          time.Time  `json:"occurred_at"`
 	CreatedAt           time.Time  `json:"created_at"`
 	UpdatedAt           time.Time  `json:"updated_at"`
@@ -85,7 +88,13 @@ func validatePaymentActorsTx(ctx context.Context, tx *sql.Tx, groupUUID string, 
 }
 
 func applyPaymentUpsertTx(ctx context.Context, tx *sql.Tx, event LedgerEvent, payload PaymentEventPayload) error {
-	_, err := loadPaymentTx(ctx, tx, event.GroupUUID, event.EntityUUID)
+	currencyLock, err := currencyLockFromEvent(event)
+	if err != nil {
+		return err
+	}
+	rateSnapshotDate := nullableRateSnapshotDate(currencyLock.RateSnapshotDate)
+
+	_, err = loadPaymentTx(ctx, tx, event.GroupUUID, event.EntityUUID)
 	if err != nil && !errors.Is(err, ErrPaymentNotFound) {
 		return err
 	}
@@ -95,9 +104,10 @@ func applyPaymentUpsertTx(ctx context.Context, tx *sql.Tx, event LedgerEvent, pa
 			INSERT INTO payments (
 				payment_uuid, group_uuid, created_by_actor_uuid, created_by_device_id,
 				from_actor_uuid, to_actor_uuid, currency_code, amount_minor_units,
+				exchange_rate_to_usd, usd_amount_minor_units, rate_snapshot_date,
 				occurred_at, created_at, updated_at, latest_event_sequence, voided_at
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, $11, NULL)`,
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $14, NULL)`,
 			event.EntityUUID,
 			event.GroupUUID,
 			event.ActorUUID,
@@ -106,6 +116,9 @@ func applyPaymentUpsertTx(ctx context.Context, tx *sql.Tx, event LedgerEvent, pa
 			payload.ToActorUUID,
 			payload.CurrencyCode,
 			payload.AmountMinorUnits,
+			currencyLock.ExchangeRateToUSD,
+			currencyLock.USDAmountMinorUnits,
+			rateSnapshotDate,
 			payload.OccurredAt,
 			event.EventCreatedAt,
 			event.Sequence,
@@ -120,9 +133,12 @@ func applyPaymentUpsertTx(ctx context.Context, tx *sql.Tx, event LedgerEvent, pa
 				to_actor_uuid = $4,
 				currency_code = $5,
 				amount_minor_units = $6,
-				occurred_at = $7,
-				updated_at = $8,
-				latest_event_sequence = $9,
+				exchange_rate_to_usd = $7,
+				usd_amount_minor_units = $8,
+				rate_snapshot_date = $9,
+				occurred_at = $10,
+				updated_at = $11,
+				latest_event_sequence = $12,
 				voided_at = NULL
 			WHERE payment_uuid = $1 AND group_uuid = $2`,
 			event.EntityUUID,
@@ -131,6 +147,9 @@ func applyPaymentUpsertTx(ctx context.Context, tx *sql.Tx, event LedgerEvent, pa
 			payload.ToActorUUID,
 			payload.CurrencyCode,
 			payload.AmountMinorUnits,
+			currencyLock.ExchangeRateToUSD,
+			currencyLock.USDAmountMinorUnits,
+			rateSnapshotDate,
 			payload.OccurredAt,
 			event.EventCreatedAt,
 			event.Sequence,
@@ -174,6 +193,8 @@ func loadPaymentTx(ctx context.Context, tx *sql.Tx, groupUUID, paymentUUID strin
 	err := tx.QueryRowContext(ctx, `
 		SELECT payment_uuid, group_uuid, created_by_actor_uuid, created_by_device_id,
 			from_actor_uuid, to_actor_uuid, currency_code, amount_minor_units,
+			exchange_rate_to_usd::text, usd_amount_minor_units,
+			COALESCE(rate_snapshot_date::text, ''),
 			occurred_at, created_at, updated_at, latest_event_sequence, voided_at
 		FROM payments
 		WHERE group_uuid = $1 AND payment_uuid = $2`, groupUUID, paymentUUID).Scan(
@@ -185,6 +206,9 @@ func loadPaymentTx(ctx context.Context, tx *sql.Tx, groupUUID, paymentUUID strin
 		&payment.ToActorUUID,
 		&payment.CurrencyCode,
 		&payment.AmountMinorUnits,
+		&payment.ExchangeRateToUSD,
+		&payment.USDAmountMinorUnits,
+		&payment.RateSnapshotDate,
 		&payment.OccurredAt,
 		&payment.CreatedAt,
 		&payment.UpdatedAt,
@@ -220,6 +244,8 @@ func (database *Database) ListPaymentsForDevice(ctx context.Context, groupUUID, 
 	rows, err := database.db.QueryContext(ctx, `
 		SELECT payment_uuid, group_uuid, created_by_actor_uuid, created_by_device_id,
 			from_actor_uuid, to_actor_uuid, currency_code, amount_minor_units,
+			exchange_rate_to_usd::text, usd_amount_minor_units,
+			COALESCE(rate_snapshot_date::text, ''),
 			occurred_at, created_at, updated_at, latest_event_sequence, voided_at
 		FROM payments
 		WHERE group_uuid = $1
@@ -242,6 +268,9 @@ func (database *Database) ListPaymentsForDevice(ctx context.Context, groupUUID, 
 			&payment.ToActorUUID,
 			&payment.CurrencyCode,
 			&payment.AmountMinorUnits,
+			&payment.ExchangeRateToUSD,
+			&payment.USDAmountMinorUnits,
+			&payment.RateSnapshotDate,
 			&payment.OccurredAt,
 			&payment.CreatedAt,
 			&payment.UpdatedAt,

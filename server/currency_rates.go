@@ -51,6 +51,9 @@ func newCurrencyRateService(db *database.Database) (*currencyRateService, error)
 	if err != nil {
 		return nil, fmt.Errorf("configure currency rate base: %w", err)
 	}
+	if base != defaultCurrencyRatesBase {
+		return nil, fmt.Errorf("CURRENCY_RATES_BASE must be %s because ledger conversions settle in USD", defaultCurrencyRatesBase)
+	}
 
 	timezoneName := valueOrDefault(os.Getenv("CURRENCY_RATES_TIMEZONE"), defaultCurrencyRatesTimezone)
 	timezone, err := time.LoadLocation(timezoneName)

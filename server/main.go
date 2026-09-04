@@ -27,8 +27,16 @@ func main() {
 	}
 	defer db.Close()
 
+	currencyRates, err := newCurrencyRateService(db)
+	if err != nil {
+		log.Fatalf("configuring currency rates: %v", err)
+	}
+	applicationContext, stopApplication := context.WithCancel(context.Background())
+	defer stopApplication()
+	currencyRates.Start(applicationContext)
+
 	port := valueOrDefault(os.Getenv("PORT"), "8080")
-	server := newHTTPServer(":"+port, db)
+	server := newHTTPServer(":"+port, db, currencyRates)
 
 	shutdown := make(chan os.Signal, 1)
 	signal.Notify(shutdown, os.Interrupt, syscall.SIGTERM)
@@ -51,12 +59,13 @@ func main() {
 	}
 }
 
-func newHTTPServer(address string, db *database.Database) *http.Server {
+func newHTTPServer(address string, db *database.Database, currencyRates *currencyRateService) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/register", registerHandler(db))
 	mux.HandleFunc("GET /api/healthz", healthHandler(db))
 	mux.Handle("GET /api/", requireDeviceAuth(db, http.HandlerFunc(rootHandler)))
 	mux.Handle("GET /api/device", requireDeviceAuth(db, http.HandlerFunc(deviceHandler)))
+	mux.Handle("GET /api/currency-rates", requireDeviceAuth(db, listCurrencyRatesHandler(currencyRates)))
 	mux.Handle("GET /api/groups", requireDeviceAuth(db, listGroupsHandler(db)))
 	mux.Handle("POST /api/groups/{group_uuid}/events", requireDeviceAuth(db, http.HandlerFunc(appendLedgerEventHandler(db))))
 	mux.Handle("GET /api/groups/{group_uuid}/events", requireDeviceAuth(db, http.HandlerFunc(listLedgerEventsHandler(db))))

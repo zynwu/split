@@ -140,6 +140,71 @@ recorded as a `group.name_updated` ledger event. Reuse the same UUID in
 require the bearer token. The server stores only a hash of the token; whoever
 possesses the token can act as that device, so it must be kept private.
 
+### Currency rates
+
+The API stores one complete daily currency-rate snapshot in `currency_rates`.
+The snapshot date is the calendar date in `CURRENCY_RATES_TIMEZONE` (which
+defaults to `America/Los_Angeles`). The background refresher runs once at the
+next midnight in that timezone and also refreshes a missing/stale snapshot when
+the API starts. A failed refresh is retried every 15 minutes. The default
+source is the keyless Frankfurter v2 rates feed, and the source URL can be
+replaced with a compatible endpoint through configuration.
+
+The stored base is USD by default. Rates are exact decimal strings: a rate of
+`1.3841` means one USD equals 1.3841 CAD. The API can derive a cross-rate from
+the stored base, so clients can request CAD-to-EUR without the server storing a
+second provider snapshot.
+
+Get the latest available snapshot:
+
+```sh
+curl "http://localhost:8080/api/currency-rates?quotes=USD,CAD,EUR" \
+  -H 'Authorization: Bearer <auth_token-from-register>'
+```
+
+Get a historical snapshot or request a different base currency:
+
+```sh
+curl "http://localhost:8080/api/currency-rates?date=2026-09-04&base=CAD&quotes=USD,EUR" \
+  -H 'Authorization: Bearer <auth_token-from-register>'
+```
+
+The response is:
+
+```json
+{
+  "rate_date": "2026-09-04",
+  "base_currency_code": "USD",
+  "rates": [
+    {"quote_currency_code": "CAD", "rate": "1.3841"},
+    {"quote_currency_code": "EUR", "rate": "0.86149"},
+    {"quote_currency_code": "USD", "rate": "1"}
+  ],
+  "source": "frankfurter",
+  "fetched_at": "2026-09-04T08:07:43.764334Z"
+}
+```
+
+`date` refers to the app's stored snapshot date, not necessarily the
+provider's business date. Each database row also retains the provider date for
+auditability. Omitting `quotes` returns every currency in the snapshot.
+Unknown historical snapshots return `404`; if no snapshot has ever been
+fetched, the latest request returns `503` while the refresher is still working.
+
+The Compose service accepts these settings:
+
+```text
+CURRENCY_RATES_ENABLED=true
+CURRENCY_RATES_BASE=USD
+CURRENCY_RATES_SOURCE_URL=https://api.frankfurter.dev/v2/rates
+CURRENCY_RATES_TIMEZONE=America/Los_Angeles
+```
+
+Rates are currently an independent read service; expenses, payments, and
+balances continue to use their recorded native currencies. A later balancing
+change can use this endpoint without changing the ledger schema or historical
+amounts.
+
 ### Expense ledger
 
 Expenses and group metadata are written as immutable ledger events and read

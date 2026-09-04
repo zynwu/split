@@ -22,6 +22,10 @@ services:
     environment:
       PORT: 8080
       DATABASE_URL: "postgres://${POSTGRES_USER:-split}:${POSTGRES_PASSWORD:-split}@postgres:5432/${POSTGRES_DB:-split}?sslmode=disable"
+      CURRENCY_RATES_ENABLED: ${CURRENCY_RATES_ENABLED:-true}
+      CURRENCY_RATES_BASE: ${CURRENCY_RATES_BASE:-USD}
+      CURRENCY_RATES_SOURCE_URL: ${CURRENCY_RATES_SOURCE_URL:-https://api.frankfurter.dev/v2/rates}
+      CURRENCY_RATES_TIMEZONE: ${CURRENCY_RATES_TIMEZONE:-America/Los_Angeles}
     ports:
       - "${API_PORT:-8080}:8080"
     depends_on:

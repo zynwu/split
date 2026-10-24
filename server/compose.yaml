@@ -5,8 +5,6 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-split}
       POSTGRES_USER: ${POSTGRES_USER:-split}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-split}
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - split-postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -27,7 +25,7 @@ services:
       CURRENCY_RATES_SOURCE_URL: ${CURRENCY_RATES_SOURCE_URL:-https://api.frankfurter.dev/v2/rates}
       CURRENCY_RATES_TIMEZONE: ${CURRENCY_RATES_TIMEZONE:-America/Los_Angeles}
     ports:
-      - "${API_PORT:-8080}:8080"
+      - "127.0.0.1:${API_PORT:-8080}:8080"
     depends_on:
       postgres:
         condition: service_healthy

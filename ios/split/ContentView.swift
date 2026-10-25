@@ -1,11 +1,12 @@
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
     @Bindable var store: SplitStore
-    @AppStorage(DeviceIDStorageKey.deviceID) private var storedDeviceID = ""
     @State private var displayName: String = ""
     @State private var isActionMenuExpanded = false
     @State private var activeGroupSheet: GroupActionSheet?
+    @State private var isQuickMenuPresented = false
 
     var body: some View {
         NavigationStack {
@@ -20,13 +21,6 @@ struct ContentView: View {
                             Button("Save Display Name", action: saveDisplayName)
                                 .disabled(displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         }
-
-                        LabeledContent("Registration", value: store.registrationStatus.label)
-                            .font(.caption)
-                        LabeledContent("Device ID", value: storedDeviceID.isEmpty ? "Not registered" : storedDeviceID)
-                            .font(.caption)
-                        LabeledContent("API", value: APIConfiguration.baseURL.absoluteString)
-                            .font(.caption)
                     }
 
                     Section("Groups") {
@@ -57,6 +51,9 @@ struct ContentView: View {
                 .onAppear {
                     displayName = store.displayName
                 }
+                .onChange(of: store.displayName) { _, updatedName in
+                    displayName = updatedName
+                }
 
                 GroupActionButton(
                     isExpanded: $isActionMenuExpanded,
@@ -81,6 +78,21 @@ struct ContentView: View {
                 }
             }
         }
+        .overlay {
+            ShakeDetector {
+                guard !isQuickMenuPresented else { return }
+                isQuickMenuPresented = true
+            }
+            .frame(width: 1, height: 1)
+            .opacity(0)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
+        .sheet(isPresented: $isQuickMenuPresented) {
+            QuickMenuView(store: store) {
+                isQuickMenuPresented = false
+            }
+        }
     }
 
     private func saveDisplayName() {
@@ -98,6 +110,154 @@ struct ContentView: View {
         activeGroupSheet = .join
     }
 
+}
+
+private struct ShakeDetector: UIViewRepresentable {
+    let onShake: () -> Void
+
+    func makeUIView(context: Context) -> ShakeDetectingView {
+        let view = ShakeDetectingView()
+        view.onShake = onShake
+        return view
+    }
+
+    func updateUIView(_ uiView: ShakeDetectingView, context: Context) {
+        uiView.onShake = onShake
+    }
+}
+
+private final class ShakeDetectingView: UIView {
+    var onShake: (() -> Void)?
+
+    override var canBecomeFirstResponder: Bool { true }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        becomeFirstResponder()
+    }
+
+    override func motionEnded(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
+        super.motionEnded(motion, with: event)
+        if motion == .motionShake {
+            onShake?()
+        }
+    }
+}
+
+private struct QuickMenuView: View {
+    let store: SplitStore
+    let onClose: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            List {
+                NavigationLink {
+                    AppSettingsView(store: store, onReset: onClose)
+                } label: {
+                    Label("Settings", systemImage: "gearshape")
+                }
+            }
+            .navigationTitle("Quick Menu")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done", action: onClose)
+                }
+            }
+        }
+    }
+}
+
+private struct AppSettingsView: View {
+    let store: SplitStore
+    let onReset: () -> Void
+    @AppStorage(DeviceIDStorageKey.deviceID) private var storedDeviceID = ""
+
+    var body: some View {
+        List {
+            Section("This Device") {
+                LabeledContent("Registration", value: store.registrationStatus.label)
+                    .font(.caption)
+                LabeledContent("Device ID", value: storedDeviceID.isEmpty ? "Not registered" : storedDeviceID)
+                    .font(.caption)
+                LabeledContent("API", value: APIConfiguration.baseURL.absoluteString)
+                    .font(.caption)
+            }
+
+            Section("Advanced") {
+                NavigationLink {
+                    ResetDeviceConfirmationView(store: store, onReset: onReset)
+                } label: {
+                    Label("Reset This Device", systemImage: "trash")
+                        .foregroundStyle(.red)
+                }
+            }
+        }
+        .navigationTitle("Settings")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct ResetDeviceConfirmationView: View {
+    @Environment(\.dismiss) private var dismiss
+    let store: SplitStore
+    let onReset: () -> Void
+    @State private var isResetting = false
+    @State private var resetError: String?
+
+    var body: some View {
+        List {
+            Section {
+                Text("This removes the data and credentials saved by Split on this device.")
+            }
+
+            Section("Will Be Cleared") {
+                Label("Saved groups, expenses, and payments", systemImage: "externaldrive")
+                Label("Pending unsynced changes", systemImage: "arrow.triangle.2.circlepath")
+                Label("This device's ID and API credentials", systemImage: "key")
+            }
+
+            Section("Will Stay on the Server") {
+                Text("Shared groups and expenses already synced to the server are not deleted. This device will register again, and you may need to rejoin your groups.")
+            }
+
+            Section {
+                Button(role: .destructive, action: resetThisDevice) {
+                    HStack {
+                        Spacer()
+                        Text(isResetting ? "Resetting…" : "Reset This Device")
+                        Spacer()
+                    }
+                }
+                .disabled(isResetting)
+            }
+        }
+        .navigationTitle("Reset Device")
+        .navigationBarTitleDisplayMode(.inline)
+        .alert("Couldn't Reset This Device", isPresented: Binding(
+            get: { resetError != nil },
+            set: { if !$0 { resetError = nil } }
+        )) {
+            Button("OK", role: .cancel) { resetError = nil }
+        } message: {
+            Text(resetError ?? "Please try again.")
+        }
+    }
+
+    private func resetThisDevice() {
+        isResetting = true
+        Task {
+            do {
+                try await store.resetLocalData()
+                isResetting = false
+                dismiss()
+                onReset()
+            } catch {
+                isResetting = false
+                resetError = error.localizedDescription
+            }
+        }
+    }
 }
 
 private enum GroupActionSheet: Identifiable {

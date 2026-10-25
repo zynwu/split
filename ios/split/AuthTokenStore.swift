@@ -12,7 +12,11 @@ protocol AuthTokenStoring {
 }
 
 struct KeychainAuthTokenStore: AuthTokenStoring {
+#if DEBUG
     private let service = "split.auth"
+#else
+    private let service = "split.auth.release"
+#endif
     private let account = "device-token"
 
     func loadToken() throws -> String? {

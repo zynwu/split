@@ -918,6 +918,32 @@ final class SplitStore {
         }
     }
 
+    func resetLocalData() async throws {
+        try authTokenStore.deleteToken()
+        deviceIDStore.deleteDeviceID()
+
+        if FileManager.default.fileExists(atPath: storageURL.path) {
+            try FileManager.default.removeItem(at: storageURL)
+        }
+
+        deviceID = nil
+        displayName = "Me"
+        actors = []
+        groups = []
+        expenses = []
+        payments = []
+        pendingOperations = []
+        auditEvents = []
+        paymentAuditEvents = []
+        groupBalances = [:]
+        groupSyncStates = [:]
+        registrationStatus = .notStarted
+        nextClientSequence = 0
+        syncingGroupIDs.removeAll()
+
+        await prepareForLaunch()
+    }
+
     private func registerDevice() async throws {
         registrationStatus = .registering
         let response = try await apiClient.register()
@@ -1977,7 +2003,13 @@ final class SplitStore {
 
     nonisolated private static var defaultStorageURL: URL {
         let baseURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return baseURL.appending(path: "split", directoryHint: .isDirectory).appending(path: "local-state.json")
+        let stateFileName: String
+#if DEBUG
+        stateFileName = "local-state.json"
+#else
+        stateFileName = "local-state-release.json"
+#endif
+        return baseURL.appending(path: "split", directoryHint: .isDirectory).appending(path: stateFileName)
     }
 
     private static func loadSnapshot(from url: URL, decoder: JSONDecoder) -> SplitSnapshot? {

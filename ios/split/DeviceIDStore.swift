@@ -1,12 +1,17 @@
 import Foundation
 
 enum DeviceIDStorageKey {
+#if DEBUG
     static let deviceID = "deviceID"
+#else
+    static let deviceID = "deviceID.release"
+#endif
 }
 
 protocol DeviceIDStoring {
     func loadDeviceID() -> DeviceID?
     func saveDeviceID(_ deviceID: DeviceID)
+    func deleteDeviceID()
 }
 
 struct UserDefaultsDeviceIDStore: DeviceIDStoring {
@@ -24,5 +29,9 @@ struct UserDefaultsDeviceIDStore: DeviceIDStoring {
 
     func saveDeviceID(_ deviceID: DeviceID) {
         userDefaults.set(deviceID.rawValue, forKey: key)
+    }
+
+    func deleteDeviceID() {
+        userDefaults.removeObject(forKey: key)
     }
 }

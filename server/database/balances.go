@@ -182,13 +182,9 @@ func (database *Database) GetGroupBalancesForDevice(ctx context.Context, groupUU
 			return GroupBalances{}, fmt.Errorf("scan payment balance row: %w", err)
 		}
 
-		if err := addBalance(amounts, fromActorUUID, -usdAmountMinorUnits); err != nil {
+		if err := applyPaymentBalance(amounts, fromActorUUID, toActorUUID, usdAmountMinorUnits); err != nil {
 			paymentRows.Close()
-			return GroupBalances{}, fmt.Errorf("debit payment sender: %w", err)
-		}
-		if err := addBalance(amounts, toActorUUID, usdAmountMinorUnits); err != nil {
-			paymentRows.Close()
-			return GroupBalances{}, fmt.Errorf("credit payment recipient: %w", err)
+			return GroupBalances{}, fmt.Errorf("apply payment balance: %w", err)
 		}
 	}
 	if err := paymentRows.Err(); err != nil {
@@ -274,6 +270,19 @@ func addBalance(amounts map[string]int64, actorUUID string, delta int64) error {
 		return ErrBalanceOverflow
 	}
 	amounts[actorUUID] = current + delta
+	return nil
+}
+
+// applyPaymentBalance moves value from the recipient's claim to the sender's
+// balance. A negative balance means the actor owes money, so a debtor paying a
+// creditor increases the sender's balance and decreases the recipient's.
+func applyPaymentBalance(amounts map[string]int64, fromActorUUID, toActorUUID string, usdAmountMinorUnits int64) error {
+	if err := addBalance(amounts, fromActorUUID, usdAmountMinorUnits); err != nil {
+		return fmt.Errorf("credit payment sender: %w", err)
+	}
+	if err := addBalance(amounts, toActorUUID, -usdAmountMinorUnits); err != nil {
+		return fmt.Errorf("debit payment recipient: %w", err)
+	}
 	return nil
 }
 

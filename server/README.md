@@ -260,9 +260,11 @@ curl -X POST "http://localhost:8080/api/groups/<group-uuid>/events" \
 ```
 
 The event response includes the current `payment` projection. `from_actor_uuid`
-is debited and `to_actor_uuid` is credited by the payment amount. Payments keep
-their native amount for display and also return the locked USD amount. Read all
-payment records, including voided history, with:
+is the member making the payment and `to_actor_uuid` is the member receiving it.
+In balances, the payment increases the sender's net balance and decreases the
+recipient's by the locked USD amount, moving an outstanding debt toward zero.
+Payments keep their native amount for display and also return the locked USD
+amount. Read all payment records, including voided history, with:
 
 ```sh
 curl "http://localhost:8080/api/groups/<group-uuid>/payments" \
